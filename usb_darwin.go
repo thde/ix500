@@ -1,4 +1,4 @@
-package usb
+package ix500
 
 import "errors"
 

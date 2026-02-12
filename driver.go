@@ -1,24 +1,10 @@
-// Copyright 2016 Michael Stapelberg and contributors
-//
-// Licensed under the Apache License, Version 2.0 (the "License");
-// you may not use this file except in compliance with the License.
-// You may obtain a copy of the License at
-//
-//     http://www.apache.org/licenses/LICENSE-2.0
-//
-// Unless required by applicable law or agreed to in writing, software
-// distributed under the License is distributed on an "AS IS" BASIS,
-// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-// See the License for the specific language governing permissions and
-// limitations under the License.
-
-// Package fss500 is a driver for the Fujitsu ScanSnap iX500 document
+// Package ix500 is a driver for the Fujitsu ScanSnap iX500 document
 // scanner, implemented from scratch based on USB traffic
 // captures. Terminology has been chosen to be consistent with the
 // SANE fujitsu driver’s terminology where appropriate.
 //
 // See also https://www.staff.uni-mainz.de/tacke/scsi/SCSI2-15.html
-package fss500
+package ix500
 
 import (
 	"encoding/binary"
@@ -650,7 +636,7 @@ func LampOn(dev io.ReadWriter) error {
 // HardwareStatus contains status bits for individual features of the
 // scanner, e.g. whether paper is inserted into the hopper, and
 // whether the scan button was pressed.
-type HardwareStatus struct {
+type hardwareStatus struct {
 	top bool
 	a3  bool
 	b4  bool
@@ -676,8 +662,8 @@ type HardwareStatus struct {
 	skewAngle uint16
 }
 
-func hardwareStatusFromBytes(b []byte) HardwareStatus {
-	return HardwareStatus{
+func hardwareStatusFromBytes(b []byte) hardwareStatus {
+	return hardwareStatus{
 		top: (b[2]>>7)&1 == 1,
 		a3:  (b[2]>>3)&1 == 1,
 		b4:  (b[2]>>2)&1 == 1,
@@ -707,7 +693,7 @@ func hardwareStatusFromBytes(b []byte) HardwareStatus {
 // GetHardwareStatus retrieves the hardware status (including whether
 // paper is inserted into the hopper, and whether the scan button was
 // pressed) from the device.
-func GetHardwareStatus(dev io.ReadWriter) (HardwareStatus, error) {
+func GetHardwareStatus(dev io.ReadWriter) (hardwareStatus, error) {
 	// request:
 	// 000: 43 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 C...............
 	// 010: 00 00 00 c2 00 00 00 00 00 00 00 0c 00 00 00    ...............
@@ -732,7 +718,7 @@ func GetHardwareStatus(dev io.ReadWriter) (HardwareStatus, error) {
 		respLen: 12,
 	})
 	if err != nil {
-		return HardwareStatus{}, err
+		return hardwareStatus{}, err
 	}
 	return hardwareStatusFromBytes(resp.Extra), nil
 }
