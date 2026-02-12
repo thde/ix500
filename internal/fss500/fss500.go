@@ -77,7 +77,6 @@ func doWithoutRequestSense(dev io.ReadWriter, r *request) (*Response, error) {
 	}
 
 	if r.extra != nil {
-		//log.Printf("writing extra %x", r.extra)
 		if _, err := dev.Write(r.extra); err != nil {
 			return nil, err
 		}
@@ -92,11 +91,7 @@ func doWithoutRequestSense(dev io.ReadWriter, r *request) (*Response, error) {
 			return nil, err
 		}
 		resp.Extra = resp.Extra[:num]
-		max := len(resp.Extra)
-		if max > 10 {
-			max = 10
-		}
-		//log.Printf("read extra %x", resp.Extra[:max])
+
 	}
 
 	resp.Raw = make([]byte, 32)
@@ -105,7 +100,6 @@ func doWithoutRequestSense(dev io.ReadWriter, r *request) (*Response, error) {
 		return nil, err
 	}
 	resp.Raw = resp.Raw[:num]
-	//log.Printf("read %x", resp.Raw)
 	return &resp, err
 }
 
@@ -150,8 +144,6 @@ func do(dev io.ReadWriter, r *request) (*Response, error) {
 	rsInfo := rsResp.Extra[3 : 3+4]
 	rsEom := (rsResp.Extra[2]>>6)&0x1 == 0x1
 	rsIli := (rsResp.Extra[2]>>5)&0x1 == 0x1
-	//log.Printf("sense = %v, asc = %v, ascq = %v, rsInfo = %v, rsEom = %v, rsIli = %v",
-	//sense, asc, ascq, rsInfo, rsEom, rsIli)
 
 	if rsIli {
 		n := len(resp.Extra) - int(binary.BigEndian.Uint32(rsInfo))
