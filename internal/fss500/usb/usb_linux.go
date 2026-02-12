@@ -19,7 +19,6 @@ package usb
 
 import (
 	"fmt"
-	"io/ioutil"
 	"os"
 	"path/filepath"
 	"strings"
@@ -76,7 +75,7 @@ func newDevice(name string) (*Device, error) {
 	dev := &Device{name: name}
 
 	// read DEVNAME= from uevent to locate the device within /dev
-	uevent, err := ioutil.ReadFile(dev.sysPath("uevent"))
+	uevent, err := os.ReadFile(dev.sysPath("uevent"))
 	if err != nil {
 		return nil, err
 	}
@@ -89,7 +88,7 @@ func newDevice(name string) (*Device, error) {
 		return nil, fmt.Errorf("%q unexpectedly did not not contain a DEVNAME= line", dev.sysPath("uevent"))
 	}
 
-	dev.f, err = os.OpenFile(filepath.Join("/dev", dev.devName), os.O_RDWR, 0664)
+	dev.f, err = os.OpenFile(filepath.Join("/dev", dev.devName), os.O_RDWR, 0o664)
 	if err != nil {
 		return nil, err
 	}
@@ -189,11 +188,11 @@ func FindDevice() (*Device, error) {
 		if badName(dev) {
 			continue
 		}
-		idProduct, err := ioutil.ReadFile(filepath.Join(usbDevicesRoot, dev, "idProduct"))
+		idProduct, err := os.ReadFile(filepath.Join(usbDevicesRoot, dev, "idProduct"))
 		if err != nil {
 			return nil, err
 		}
-		idVendor, err := ioutil.ReadFile(filepath.Join(usbDevicesRoot, dev, "idVendor"))
+		idVendor, err := os.ReadFile(filepath.Join(usbDevicesRoot, dev, "idVendor"))
 		if err != nil {
 			return nil, err
 		}
