@@ -3,7 +3,9 @@
 // captures. Terminology has been chosen to be consistent with the
 // SANE fujitsu driver’s terminology where appropriate.
 //
-// See also https://www.staff.uni-mainz.de/tacke/scsi/SCSI2-15.html
+// See also:
+//   - https://www.staff.uni-mainz.de/tacke/scsi/SCSI2-15.html
+//   - https://gitlab.com/sane-project/backends/-/raw/master/backend/fujitsu.c
 package ix500
 
 import (
