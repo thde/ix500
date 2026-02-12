@@ -63,7 +63,7 @@ func newDevice(name string) (*Device, error) {
 	if err != nil {
 		return nil, err
 	}
-	for _, line := range strings.Split(string(uevent), "\n") {
+	for line := range strings.SplitSeq(string(uevent), "\n") {
 		if after, found := strings.CutPrefix(line, "DEVNAME="); found {
 			dev.devName = after
 		}
