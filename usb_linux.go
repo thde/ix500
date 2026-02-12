@@ -64,8 +64,8 @@ func newDevice(name string) (*Device, error) {
 		return nil, err
 	}
 	for _, line := range strings.Split(string(uevent), "\n") {
-		if strings.HasPrefix(line, "DEVNAME=") {
-			dev.devName = strings.TrimPrefix(line, "DEVNAME=")
+		if after, found := strings.CutPrefix(line, "DEVNAME="); found {
+			dev.devName = after
 		}
 	}
 	if dev.devName == "" {
