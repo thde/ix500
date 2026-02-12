@@ -9,7 +9,8 @@ import (
 	"time"
 )
 
-// Scanner manages scanner lifecycle.
+// Scanner manages the lifecycle and operations of a Fujitsu ScanSnap iX500 scanner.
+// It handles initialization, button polling, and scanning operations.
 type Scanner struct {
 	dev         io.ReadWriteCloser
 	initialized bool
@@ -17,17 +18,32 @@ type Scanner struct {
 }
 
 var (
-	ErrNoDocument     = errors.New("no document in hopper")
+	// ErrNoDocument is returned when an operation requires a document in the hopper,
+	// but none is detected.
+	ErrNoDocument = errors.New("no document in hopper")
+
+	// ErrNotInitialized is returned when scanning is attempted before calling Initialize.
 	ErrNotInitialized = errors.New("scanner not initialized")
 )
 
-// Options configures scanner behavior.
+// Options configures timing and retry behavior for Scanner operations.
 type Options struct {
-	ButtonPollInterval time.Duration // How often to check button (default: 1s)
-	DataPollInterval   time.Duration // Retry interval for ErrTemporaryNoData (default: 500ms)
-	RicRetries         int           // Max Ric() retries (default: 120)
+	// ButtonPollInterval specifies how often to check the scan button status.
+	// Default is 1 second.
+	ButtonPollInterval time.Duration
+
+	// DataPollInterval specifies the retry interval when the scanner reports
+	// temporary no data during scanning.
+	// Default is 500ms.
+	DataPollInterval time.Duration
+
+	// RicRetries specifies the maximum number of times to retry the ric command
+	// when waiting for image data to become available. Each retry waits DataPollInterval
+	// before the next attempt. Default is 120 retries (60 seconds at 500ms intervals).
+	RicRetries int
 }
 
+// defaultOptions returns the default options for the Scanner.
 func defaultOptions() Options {
 	return Options{
 		ButtonPollInterval: 1 * time.Second,
@@ -36,26 +52,17 @@ func defaultOptions() Options {
 	}
 }
 
-// HardwareStatus contains scanner state.
-type HardwareStatus struct {
-	Hopper bool // Paper loaded
-	ScanSw bool // Scan button pressed
-}
-
-func hwStatusFromDriver(status hardwareStatus) *HardwareStatus {
-	return &HardwareStatus{
-		Hopper: status.Hopper,
-		ScanSw: status.ScanSw,
-	}
-}
-
-// FindScanner discovers and opens the scanner USB device.
+// FindScanner discovers and opens a connected Fujitsu ScanSnap iX500 device.
+// It returns an io.ReadWriteCloser that can be used to communicate with the device.
+// The caller is responsible for closing the returned device.
 func FindScanner() (io.ReadWriteCloser, error) {
 	return FindDevice()
 }
 
-// New creates a Scanner wrapping the USB device.
-// Call Close() when done to release resources.
+// New creates a new Scanner instance wrapping the provided USB device.
+// The opts parameter can be nil to use default options.
+// The caller is responsible for closing the underlying device via the Close method
+// when the scanner is no longer needed.
 func New(dev io.ReadWriteCloser, opts *Options) *Scanner {
 	s := &Scanner{
 		dev:  dev,
@@ -75,13 +82,24 @@ func New(dev io.ReadWriteCloser, opts *Options) *Scanner {
 	return s
 }
 
-// Close releases all resources and closes USB device.
+// Close releases any resources associated with the scanner and closes the underlying USB device.
 func (s *Scanner) Close() error {
 	return s.dev.Close()
 }
 
-// Initialize prepares scanner hardware (executes 13-step sequence).
-// Must be called before WaitForButton or Scan.
+// Initialize prepares the scanner hardware for operation.
+//
+// This method executes the required SCSI command sequence to configure the scanner:
+//  1. INQUIRY - verify device identification
+//  2. SEND DIAGNOSTIC (preread) - set 600 dpi resolution
+//  3. MODE SELECT (multiple) - configure ADF, double-feed detection, color dropout, buffering, etc.
+//  4. SET WINDOW - define front and back scan areas
+//  5. SEND - transfer lookup tables and quantization tables
+//  6. SCANNER_CONTROL (lamp on) - activate scanning lamp
+//  7. GET_HW_STATUS - verify hardware readiness
+//
+// This method must be called successfully before WaitForButton or Scan.
+// It is idempotent; subsequent calls return immediately if already initialized.
 func (s *Scanner) Initialize(ctx context.Context) error {
 	if s.initialized {
 		return nil // idempotent
@@ -91,18 +109,18 @@ func (s *Scanner) Initialize(ctx context.Context) error {
 		name string
 		fn   func(io.ReadWriter) error
 	}{
-		{"inquire", Inquire},
-		{"preread", Preread},
-		{"mode_select_auto", ModeSelectAuto},
-		{"mode_select_double_feed", ModeSelectDoubleFeed},
-		{"mode_select_background", ModeSelectBackground},
-		{"mode_select_dropout", ModeSelectDropout},
-		{"mode_select_buffering", ModeSelectBuffering},
-		{"mode_select_prepick", ModeSelectPrepick},
-		{"set_window", SetWindow},
-		{"send_lut", SendLut},
-		{"send_qtable", SendQtable},
-		{"lamp_on", LampOn},
+		{"inquire", inquire},
+		{"preread", preread},
+		{"mode_select_auto", modeSelectAuto},
+		{"mode_select_double_feed", modeSelectDoubleFeed},
+		{"mode_select_background", modeSelectBackground},
+		{"mode_select_dropout", modeSelectDropout},
+		{"mode_select_buffering", modeSelectBuffering},
+		{"mode_select_prepick", modeSelectPrepick},
+		{"set_window", setWindow},
+		{"send_lut", sendLUT},
+		{"send_qtable", sendQTable},
+		{"lamp_on", lampOn},
 	}
 
 	for _, step := range steps {
@@ -114,8 +132,7 @@ func (s *Scanner) Initialize(ctx context.Context) error {
 		}
 	}
 
-	// Final status check
-	if _, err := GetHardwareStatus(s.dev); err != nil {
+	if _, err := hardwareStatus(s.dev); err != nil {
 		return fmt.Errorf("get_hardware_status: %w", err)
 	}
 
@@ -123,30 +140,19 @@ func (s *Scanner) Initialize(ctx context.Context) error {
 	return nil
 }
 
-// GetStatus returns current hardware status.
-func (s *Scanner) GetStatus(ctx context.Context) (*HardwareStatus, error) {
-	if ctx.Err() != nil {
-		return nil, ctx.Err()
-	}
-
-	status, err := GetHardwareStatus(s.dev)
-	if err != nil {
-		return nil, fmt.Errorf("get hardware status: %w", err)
-	}
-
-	return hwStatusFromDriver(status), nil
-}
-
-// IsButtonPressed checks button state without blocking.
+// IsButtonPressed checks if the scan button is currently pressed.
+// It performs a non-blocking check of the hardware status.
 func (s *Scanner) IsButtonPressed(ctx context.Context) (bool, error) {
-	status, err := s.GetStatus(ctx)
+	status, err := hardwareStatus(s.dev)
 	if err != nil {
 		return false, err
 	}
+
 	return status.ScanSw, nil
 }
 
-// WaitForButton blocks until scan button is pressed or ctx cancelled.
+// WaitForButton blocks until the scan button is pressed or the context is cancelled.
+// It polls the scanner status at the interval specified in Options.ButtonPollInterval.
 func (s *Scanner) WaitForButton(ctx context.Context) error {
 	ticker := time.NewTicker(s.opts.ButtonPollInterval)
 	defer ticker.Stop()
@@ -156,7 +162,7 @@ func (s *Scanner) WaitForButton(ctx context.Context) error {
 		case <-ctx.Done():
 			return ctx.Err()
 		case <-ticker.C:
-			status, err := s.GetStatus(ctx)
+			status, err := hardwareStatus(s.dev)
 			if err != nil {
 				return err
 			}
@@ -167,12 +173,23 @@ func (s *Scanner) WaitForButton(ctx context.Context) error {
 	}
 }
 
-// Scan performs complete scan, yielding each side as it's scanned.
-// Sides are yielded immediately as they're processed (streaming).
-// Order: sheet N side 0, sheet N side 1, sheet N-1 side 0, ...
-// (Hardware scans last sheet first)
-// Use Page.Sheet and Page.Side fields to reorder if needed.
-// Iterator continues until hopper empty, error, or ctx cancelled.
+// Scan performs a complete duplex scan operation, yielding pages as they are scanned.
+//
+// This method returns an iterator that yields *Page values for each side of each
+// sheet. The scanning sequence for each sheet is:
+//  1. OBJECT POSITION - load paper from hopper
+//  2. SCAN - initiate scanning of both sides
+//  3. READ (vendor-specific) - query pixel dimensions
+//  4. For each side (front=0, back=1):
+//     - Issue ric commands until data is ready
+//     - Execute READ commands to stream image data
+//     - Decode RGB data into image.Image
+//     - Yield the Page immediately
+//
+// The iteration continues until the hopper is empty (ErrHopperEmpty), an error
+// occurs, or the context is cancelled. Pages are yielded in hardware scan order:
+// Sheet N Front, Sheet N Back, Sheet (N-1) Front, etc. The iX500 scans the last
+// sheet first. Callers can use Page.Sheet and Page.Side to reorder as needed.
 func (s *Scanner) Scan(ctx context.Context) iter.Seq2[*Page, error] {
 	return func(yield func(*Page, error) bool) {
 		if !s.initialized {
@@ -187,7 +204,7 @@ func (s *Scanner) Scan(ctx context.Context) iter.Seq2[*Page, error] {
 			}
 
 			// Load next sheet
-			if err := ObjectPosition(s.dev); err != nil {
+			if err := objectPosition(s.dev); err != nil {
 				if errors.Is(err, ErrHopperEmpty) {
 					if sheetNum == 0 {
 						yield(nil, ErrNoDocument)
@@ -199,13 +216,13 @@ func (s *Scanner) Scan(ctx context.Context) iter.Seq2[*Page, error] {
 			}
 
 			// Start scan
-			if err := StartScan(s.dev); err != nil {
+			if err := startScan(s.dev); err != nil {
 				yield(nil, fmt.Errorf("start scan: %w", err))
 				return
 			}
 
 			// Get pixel size
-			if err := GetPixelSize(s.dev); err != nil {
+			if err := pixelSize(s.dev); err != nil {
 				yield(nil, fmt.Errorf("get pixel size: %w", err))
 				return
 			}
@@ -234,7 +251,7 @@ func (s *Scanner) Scan(ctx context.Context) iter.Seq2[*Page, error] {
 				// Yield this side immediately
 				page := &Page{
 					Image: img,
-					Side:  side,
+					Side:  Side(side),
 					Sheet: sheetNum,
 				}
 

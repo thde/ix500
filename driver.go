@@ -1,11 +1,26 @@
-// Package ix500 is a driver for the Fujitsu ScanSnap iX500 document
-// scanner, implemented from scratch based on USB traffic
-// captures. Terminology has been chosen to be consistent with the
-// SANE fujitsu driver’s terminology where appropriate.
+// Package ix500 implements a driver for the Fujitsu ScanSnap iX500 document scanner.
+//
+// This driver was developed from scratch based on USB traffic captures and implements
+// the SCSI-2 scanner command set over USB bulk transfer. The terminology is consistent
+// with the SANE fujitsu driver where appropriate.
+//
+// The SCSI-2 scanner device type uses a coordinate system with the upper-left corner
+// as the origin, the x-axis extending left-to-right (cross-scan direction), and the
+// y-axis extending top-to-bottom (scan direction). Measurements use a basic unit of
+// 1/1200 inch by default.
+//
+// Scanner operations follow this sequence:
+//  1. INQUIRY (0x12) - identify device
+//  2. MODE SELECT (0x15) - configure scanner settings
+//  3. SET WINDOW (0x24) - define scan area and parameters
+//  4. SEND (0x2A) - transfer lookup tables and calibration data
+//  5. OBJECT POSITION (0x31) - load paper from hopper
+//  6. SCAN (0x1B) - initiate scanning
+//  7. READ (0x28) - retrieve image data
 //
 // See also:
-//   - https://www.staff.uni-mainz.de/tacke/scsi/SCSI2-15.html
-//   - https://gitlab.com/sane-project/backends/-/raw/master/backend/fujitsu.c
+//   - https://www.staff.uni-mainz.de/tacke/scsi/SCSI2-15.html (SCSI-2 scanner specification)
+//   - https://gitlab.com/sane-project/backends/-/raw/master/backend/fujitsu.c (SANE implementation)
 package ix500
 
 import (
@@ -17,24 +32,42 @@ import (
 )
 
 var (
-	// ErrShortRead represents a short read when transferring data.
+	// ErrShortRead indicates the scanner returned fewer bytes than requested.
+	//
+	// This error is derived from the SCSI REQUEST SENSE response when the ILI
+	// (Incorrect Length Indicator) flag is set. The information field contains
+	// the residue (difference between requested and actual transfer length).
 	ErrShortRead = errors.New("short read")
 
-	// ErrEndOfPaper is returned when no more data is to be read for
-	// this page.
+	// ErrEndOfPaper indicates the scanner has reached the end of the document.
+	//
+	// This error is signaled by the EOM (End of Medium) flag in the REQUEST SENSE
+	// response. It occurs when scanning reaches the trailing edge of the paper,
+	// and no more scan lines are available for the current page.
 	ErrEndOfPaper = errors.New("end of paper")
 
-	// ErrTemporaryNoData is returned when data was requested, but
-	// there is no data to be read from the scanner.
+	// ErrTemporaryNoData indicates the scanner has no data ready at this moment.
+	//
+	// This is a vendor-specific condition (ASC 0x80, ASCQ 0x13) that occurs when
+	// the scanner is still processing the image and buffered data is not yet available
+	// for transfer. Callers should retry the operation after a brief delay.
 	ErrTemporaryNoData = errors.New("temporary no data")
 
-	// ErrHopperEmpty is returned when no paper is in the document
-	// hopper.
+	// ErrHopperEmpty indicates no paper is loaded in the automatic document feeder.
+	//
+	// This error (ASC 0x80, ASCQ 0x03) is returned by OBJECT POSITION when attempting
+	// to load paper from an empty hopper. It signals the normal end of a multi-page
+	// scanning session.
 	ErrHopperEmpty = errors.New("hopper empty")
 )
 
-// usbcmd embeds scsiCmd in a command structure for the Fujitsu
-// ScanSnap iX500, to be sent via USB bulk transfer.
+// usbcmd embeds a SCSI command in the USB bulk transfer format used by the
+// Fujitsu ScanSnap iX500.
+//
+// The iX500 uses a vendor-specific USB command wrapper: a 31-byte structure
+// starting with 0x43, followed by 18 bytes of padding (offset 0x01-0x12),
+// and then the SCSI command at offset 0x13. This format encapsulates standard
+// SCSI commands for transport over USB bulk endpoints.
 func usbcmd(scsiCmd []byte) []byte {
 	// All usb commands are 31 bytes in length, padded with zeros. The
 	// actual command starts at offset 0x13.
@@ -44,22 +77,34 @@ func usbcmd(scsiCmd []byte) []byte {
 	return result
 }
 
+// request represents a SCSI command to be sent to the scanner.
 type request struct {
-	cmd     []byte
-	extra   []byte
+	// cmd field contains the SCSI command descriptor block (CDB), typically 6 or 10 bytes.
+	cmd []byte
+	// extra field optional parameter data sent after the command (for commands
+	// like MODE SELECT, SET WINDOW, and SEND).
+	extra []byte
+	// respLen  specifies how many bytes
+	// of response data to read before reading the 32-byte USB status response.
 	respLen int
 }
 
-// Response contains the raw response and extra bytes read from the
-// device.
-type Response struct {
-	// Raw contains the raw response bytes for the SCSI command.
-	Raw []byte
-	// Extra contains the extra bytes, if any, for the SCSI command.
-	Extra []byte
+// response contains the data returned by a SCSI command.
+type response struct {
+	// raw contains the 32-byte USB status response that includes the SCSI status byte.
+	raw []byte
+	// extra contains any data payload returned by the command (e.g., inquiry data,
+	// hardware status, or image data from READ commands).
+	extra []byte
 }
 
-func doWithoutRequestSense(dev io.ReadWriter, r *request) (*Response, error) {
+// doWithoutRequestSense executes a SCSI command without automatic error handling.
+//
+// This low-level function sends the command and extra data (if any), then reads
+// the response data and USB status response. It does not check the status byte
+// or issue REQUEST SENSE on error. This is used internally by do() and for the
+// REQUEST SENSE command itself (to avoid infinite recursion).
+func doWithoutRequestSense(dev io.ReadWriter, r *request) (*response, error) {
 	if _, err := dev.Write(usbcmd(r.cmd)); err != nil {
 		return nil, err
 	}
@@ -70,38 +115,46 @@ func doWithoutRequestSense(dev io.ReadWriter, r *request) (*Response, error) {
 		}
 	}
 
-	var resp Response
+	var resp response
 
 	if r.respLen > 0 {
-		resp.Extra = make([]byte, r.respLen)
-		num, err := dev.Read(resp.Extra)
+		resp.extra = make([]byte, r.respLen)
+		num, err := dev.Read(resp.extra)
 		if err != nil {
 			return nil, err
 		}
-		resp.Extra = resp.Extra[:num]
+		resp.extra = resp.extra[:num]
 
 	}
 
-	resp.Raw = make([]byte, 32)
-	num, err := dev.Read(resp.Raw)
+	resp.raw = make([]byte, 32)
+	num, err := dev.Read(resp.raw)
 	if err != nil {
 		return nil, err
 	}
-	resp.Raw = resp.Raw[:num]
+	resp.raw = resp.raw[:num]
 	return &resp, err
 }
 
-// do sends the specified request, reads the response as instructed,
-// and reports any errors by sending an additional REQUEST SENSE
-// command.
-func do(dev io.ReadWriter, r *request) (*Response, error) {
+// do sends a SCSI request to the scanner and handles error reporting.
+//
+// This function executes the specified request and checks the USB status byte
+// at offset 9 in the response. If the status indicates an error (non-zero),
+// it automatically issues a SCSI REQUEST SENSE command (0x03) to retrieve
+// detailed error information including the sense key, additional sense code (ASC),
+// and additional sense code qualifier (ASCQ).
+//
+// The REQUEST SENSE response also includes the ILI (Incorrect Length Indicator)
+// and EOM (End of Medium) flags, which are used to adjust the returned data
+// length and signal end-of-paper conditions.
+func do(dev io.ReadWriter, r *request) (*response, error) {
 	resp, err := doWithoutRequestSense(dev, r)
 	if err != nil {
 		return nil, err
 	}
 
 	const usbStatusOffset = 9
-	if resp.Raw[usbStatusOffset] == 0 {
+	if resp.raw[usbStatusOffset] == 0 {
 		return resp, nil
 	}
 
@@ -126,23 +179,28 @@ func do(dev io.ReadWriter, r *request) (*Response, error) {
 	// 000: f0 00 03 00 00 00 00 0a 00 00 00 00 80 13 00 00 ................
 	// 010: 00 00                                           ..
 
-	sense := rsResp.Extra[2] & 0x0F
-	asc := rsResp.Extra[12]
-	ascq := rsResp.Extra[13]
-	rsInfo := rsResp.Extra[3 : 3+4]
-	rsEom := (rsResp.Extra[2]>>6)&0x1 == 0x1
-	rsIli := (rsResp.Extra[2]>>5)&0x1 == 0x1
+	sense := rsResp.extra[2] & 0x0F
+	asc := rsResp.extra[12]
+	ascq := rsResp.extra[13]
+	rsInfo := rsResp.extra[3 : 3+4]
+	rsEom := (rsResp.extra[2]>>6)&0x1 == 0x1
+	rsIli := (rsResp.extra[2]>>5)&0x1 == 0x1
 
 	if rsIli {
-		n := len(resp.Extra) - int(binary.BigEndian.Uint32(rsInfo))
-		resp.Extra = resp.Extra[:n]
+		n := len(resp.extra) - int(binary.BigEndian.Uint32(rsInfo))
+		resp.extra = resp.extra[:n]
 	}
 
 	return resp, requestSenseToError(sense, asc, ascq, rsInfo, rsEom, rsIli)
 }
 
-// Inquire requests the scanner make and model.
-func Inquire(dev io.ReadWriter) error {
+// inquire sends the SCSI INQUIRY command (0x12) to identify the scanner.
+//
+// The INQUIRY command is mandatory for all SCSI devices and retrieves standard
+// device information including the device type (0x06 for scanner devices),
+// vendor identification, product identification, and product revision level.
+// The iX500 returns "FUJITSU" as vendor and "ScanSnap iX500" as product.
+func inquire(dev io.ReadWriter) error {
 	// request:
 	// 000: 43 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 C...............
 	// 010: 00 00 00 12 00 00 00 60 00 00 00 00 00 00 00    .......`.......
@@ -171,8 +229,14 @@ func Inquire(dev io.ReadWriter) error {
 	return err
 }
 
-// Preread switches the scanner into 600 dpi scan mode.
-func Preread(dev io.ReadWriter) error {
+// preread configures scan parameters using the vendor-specific "SET PRE READMODE" command.
+//
+// This function uses the SCSI SEND DIAGNOSTIC command (0x1D) with vendor-specific
+// parameter data to configure the scanner's resolution and paper dimensions before
+// scanning. It sets both x and y resolution to 600 dpi (0x0258) and configures
+// the paper width and length in units of 1/1200 inch. The composition byte (0x05)
+// specifies the image format.
+func preread(dev io.ReadWriter) error {
 	// request:
 	// 000: 43 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 C...............
 	// 010: 00 00 00 1d 00 00 00 20 00 00 00 00 00 00 00    ....... .......
@@ -222,8 +286,13 @@ func Preread(dev io.ReadWriter) error {
 	return err
 }
 
-// ModeSelectAuto enables automatic paper feed.
-func ModeSelectAuto(dev io.ReadWriter) error {
+// modeSelectAuto enables automatic document feeder (ADF) mode using MODE SELECT.
+//
+// The SCSI MODE SELECT command (0x15) configures device-specific parameters
+// via mode pages. This function sends a vendor-specific mode page to enable
+// automatic paper feeding with deskew (0x3c) and overscan (0x06) settings.
+// The page format bit (0x10) is set to use the SCSI-2 page format.
+func modeSelectAuto(dev io.ReadWriter) error {
 	// request:
 	// 000: 43 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 C...............
 	// 010: 00 00 00 15 10 00 00 0c 00 00 00 00 00 00 00    ...............
@@ -260,8 +329,12 @@ func ModeSelectAuto(dev io.ReadWriter) error {
 	return err
 }
 
-// ModeSelectDoubleFeed enables double feed detection.
-func ModeSelectDoubleFeed(dev io.ReadWriter) error {
+// modeSelectDoubleFeed enables double feed detection using MODE SELECT.
+//
+// Double feed detection is a feature that alerts when multiple sheets of paper
+// are fed through the scanner simultaneously. This function uses MODE SELECT (0x15)
+// with a vendor-specific mode page (0x38, 0x06) to enable this hardware capability.
+func modeSelectDoubleFeed(dev io.ReadWriter) error {
 	// request:
 	// 000: 43 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 C...............
 	// 010: 00 00 00 15 10 00 00 0c 00 00 00 00 00 00 00    ...............
@@ -298,8 +371,12 @@ func ModeSelectDoubleFeed(dev io.ReadWriter) error {
 	return err
 }
 
-// ModeSelectBackground sets the background color setting
-func ModeSelectBackground(dev io.ReadWriter) error {
+// modeSelectBackground configures background color handling using MODE SELECT.
+//
+// This function sets the scanner's background color processing mode, which affects
+// how the scanner interprets the area around the document. The vendor-specific
+// mode page (0x37, 0x06) controls this image processing feature.
+func modeSelectBackground(dev io.ReadWriter) error {
 	// request:
 	// 000: 43 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 C...............
 	// 010: 00 00 00 15 10 00 00 0c 00 00 00 00 00 00 00    ...............
@@ -336,8 +413,13 @@ func ModeSelectBackground(dev io.ReadWriter) error {
 	return err
 }
 
-// ModeSelectDropout sets the dropout color.
-func ModeSelectDropout(dev io.ReadWriter) error {
+// modeSelectDropout configures color dropout filtering using MODE SELECT.
+//
+// Color dropout allows the scanner to filter out a specific color (typically red,
+// green, or blue) from the scanned image. This is useful for removing colored
+// forms or annotations. This function uses a vendor-specific mode page (0x39, 0x08)
+// to configure the dropout settings.
+func modeSelectDropout(dev io.ReadWriter) error {
 	// request:
 	// 000: 43 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 C...............
 	// 010: 00 00 00 15 10 00 00 0e 00 00 00 00 00 00 00    ...............
@@ -376,8 +458,13 @@ func ModeSelectDropout(dev io.ReadWriter) error {
 	return err
 }
 
-// ModeSelectBuffering enables buffering.
-func ModeSelectBuffering(dev io.ReadWriter) error {
+// modeSelectBuffering enables image buffering using MODE SELECT.
+//
+// Buffering allows the scanner to store scanned image data in its internal memory
+// before transferring it to the host. This can improve scanning performance by
+// allowing the scanner to continue scanning while previous data is being transferred.
+// The mode page (0x3a, 0x06) with values 0x80, 0xc0 enables this feature.
+func modeSelectBuffering(dev io.ReadWriter) error {
 	// request:
 	// 000: 43 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 C...............
 	// 010: 00 00 00 15 10 00 00 0c 00 00 00 00 00 00 00    ...............
@@ -414,8 +501,12 @@ func ModeSelectBuffering(dev io.ReadWriter) error {
 	return err
 }
 
-// ModeSelectPrepick enables prepick.
-func ModeSelectPrepick(dev io.ReadWriter) error {
+// modeSelectPrepick enables prepick mode using MODE SELECT.
+//
+// Prepick is a feature where the scanner prepares the next sheet of paper while
+// scanning the current one, reducing the time between scans. This function uses
+// a vendor-specific mode page (0x33, 0x06) to enable this performance optimization.
+func modeSelectPrepick(dev io.ReadWriter) error {
 	// request:
 	// 000: 43 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 C...............
 	// 010: 00 00 00 15 10 00 00 0c 00 00 00 00 00 00 00    ...............
@@ -452,9 +543,19 @@ func ModeSelectPrepick(dev io.ReadWriter) error {
 	return err
 }
 
-// SetWindow sets a window for scanning, specifying parameters such as
-// the brightness, threshold, contrast, compression type, etc.
-func SetWindow(dev io.ReadWriter) error {
+// setWindow defines the scanning area and image parameters using SET WINDOW.
+//
+// The SCSI SET WINDOW command (0x24) is mandatory for scanner devices and defines
+// one or more scanning windows. Each window descriptor specifies:
+//   - Resolution in pixels per inch for both axes (600 dpi = 0x0258)
+//   - Upper-left corner coordinates and dimensions in basic measurement units
+//   - Image composition (0x05 = color, 0x00 = bi-level, 0x02 = grayscale)
+//   - Brightness, threshold, and contrast settings
+//   - Compression type (if supported)
+//
+// The iX500 uses window ID 0x00 for the front side and 0x80 for the back side
+// when scanning in duplex mode.
+func setWindow(dev io.ReadWriter) error {
 	// request:
 	// 000: 43 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 C...............
 	// 010: 00 00 00 24 00 00 00 00 00 00 00 88 00 00 00    ...$...........
@@ -500,8 +601,14 @@ func SetWindow(dev io.ReadWriter) error {
 	return err
 }
 
-// TODO: document SendLut. Does lut stand for lookup table?
-func SendLut(dev io.ReadWriter) error {
+// sendLUT transfers a lookup table (LUT) to the scanner using the SEND command.
+//
+// The SCSI SEND command (0x2A) transfers data from the host to the scanner.
+// The data type code 0x83 indicates a vendor-specific lookup table used for
+// gamma correction or other pixel value transformations. The LUT maps input
+// pixel values (0-255) to output values, allowing for image enhancement.
+// This implementation sends an identity LUT (input = output).
+func sendLUT(dev io.ReadWriter) error {
 	// request:
 	// 000: 43 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 C...............
 	// 010: 00 00 00 2a 00 83 00 00 00 00 01 0a 00 00 00    ...*...........
@@ -563,8 +670,13 @@ func SendLut(dev io.ReadWriter) error {
 	return err
 }
 
-// TODO: document SendQtable
-func SendQtable(dev io.ReadWriter) error {
+// sendQTable transfers JPEG quantization tables to the scanner using SEND.
+//
+// Quantization tables are used in JPEG compression to control image quality
+// and compression ratio. The data type code 0x88 indicates a vendor-specific
+// quantization table. The tables contain the quantization values for the
+// luminance and chrominance components of the JPEG encoder.
+func sendQTable(dev io.ReadWriter) error {
 	// request:
 	// 000: 43 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 C...............
 	// 010: 00 00 00 2a 00 88 00 00 00 00 00 8a 00 00 00    ...*...........
@@ -610,8 +722,13 @@ func SendQtable(dev io.ReadWriter) error {
 	return err
 }
 
-// LampOn turns on the scanner’s lamp.
-func LampOn(dev io.ReadWriter) error {
+// lampOn activates the scanner's lamp using the vendor-specific SCANNER_CONTROL command.
+//
+// The command code 0xf1 is a vendor-specific extension for scanner control functions.
+// The scan control function byte 0x05 specifically requests lamp activation.
+// The scanner's lamp must be on and warmed up before scanning to ensure proper
+// illumination and image quality.
+func lampOn(dev io.ReadWriter) error {
 	// request:
 	// 000: 43 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 C...............
 	// 010: 00 00 00 f1 05 00 00 00 00 00 00 00 00 00 00    ...............
@@ -635,10 +752,12 @@ func LampOn(dev io.ReadWriter) error {
 	return err
 }
 
-// HardwareStatus contains status bits for individual features of the
-// scanner, e.g. whether paper is inserted into the hopper, and
-// whether the scan button was pressed.
-type hardwareStatus struct {
+// hwStatus represents the scanner's hardware state and sensor readings.
+//
+// This structure contains status flags retrieved via the vendor-specific
+// GET_HW_STATUS command. It includes paper sensor states, button states,
+// error conditions, and the detected skew angle of the scanned document.
+type hwStatus struct {
 	top bool
 	a3  bool
 	b4  bool
@@ -664,8 +783,18 @@ type hardwareStatus struct {
 	skewAngle uint16
 }
 
-func hardwareStatusFromBytes(b []byte) hardwareStatus {
-	return hardwareStatus{
+// hardwareStatusFromBytes parses the GET_HW_STATUS response into a hardwareStatus struct.
+//
+// The response format is vendor-specific. Key fields:
+//   - Byte 2: Paper size flags (top, a3, b4, a4, b5)
+//   - Byte 3: Hopper, OMR, and ADF cover state
+//   - Byte 4: Sleep mode, send switch, manual feed, and scan button state
+//   - Byte 5: Function code (lower 4 bits)
+//   - Byte 6: Ink status and double-feed detection
+//   - Byte 7: Error code
+//   - Bytes 8-9: Skew angle (16-bit big-endian)
+func hardwareStatusFromBytes(b []byte) hwStatus {
+	return hwStatus{
 		top: (b[2]>>7)&1 == 1,
 		a3:  (b[2]>>3)&1 == 1,
 		b4:  (b[2]>>2)&1 == 1,
@@ -692,10 +821,18 @@ func hardwareStatusFromBytes(b []byte) hardwareStatus {
 	}
 }
 
-// GetHardwareStatus retrieves the hardware status (including whether
-// paper is inserted into the hopper, and whether the scan button was
-// pressed) from the device.
-func GetHardwareStatus(dev io.ReadWriter) (hardwareStatus, error) {
+// hardwareStatus retrieves the scanner's hardware status using a vendor-specific command.
+//
+// The GET_HW_STATUS command (0xc2) is a Fujitsu-specific extension that returns
+// hardware sensor states including:
+//   - Paper presence in hopper (Hopper flag)
+//   - Scan button state (ScanSw flag)
+//   - ADF cover state (adfOpen flag)
+//   - Error conditions (errorCode)
+//   - Document skew angle (skewAngle)
+//
+// This is used to poll for button presses and verify the scanner is ready for operation.
+func hardwareStatus(dev io.ReadWriter) (hwStatus, error) {
 	// request:
 	// 000: 43 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 C...............
 	// 010: 00 00 00 c2 00 00 00 00 00 00 00 0c 00 00 00    ...............
@@ -720,14 +857,19 @@ func GetHardwareStatus(dev io.ReadWriter) (hardwareStatus, error) {
 		respLen: 12,
 	})
 	if err != nil {
-		return hardwareStatus{}, err
+		return hwStatus{}, err
 	}
-	return hardwareStatusFromBytes(resp.Extra), nil
+	return hardwareStatusFromBytes(resp.extra), nil
 }
 
-// ObjectPosition loads an object (paper) into the scanner, returning
-// an error if no more paper is found in the document feeder.
-func ObjectPosition(dev io.ReadWriter) error {
+// objectPosition loads paper from the hopper using the OBJECT POSITION command.
+//
+// The SCSI OBJECT POSITION command (0x31) is an optional scanner command that
+// controls document positioning. The position type byte 0x01 requests "load object",
+// which causes the scanner to feed one sheet from the automatic document feeder (ADF)
+// into the scanning position. This command returns ErrHopperEmpty when no more
+// paper is available in the hopper.
+func objectPosition(dev io.ReadWriter) error {
 	// request:
 	// 000: 43 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 C...............
 	// 010: 00 00 00 31 01 00 00 00 00 00 00 00 00 00 00    ...1...........
@@ -750,8 +892,13 @@ func ObjectPosition(dev io.ReadWriter) error {
 	return err
 }
 
-// StartScan instructs the scanner to start scanning.
-func StartScan(dev io.ReadWriter) error {
+// startScan initiates the scanning operation using the SCAN command.
+//
+// The SCSI SCAN command (0x1B) is an optional scanner command that begins
+// the scanning process for the previously defined windows. The transfer length
+// field indicates the number of window IDs being specified. This implementation
+// scans both front (0x00) and back (0x80) windows for duplex scanning.
+func startScan(dev io.ReadWriter) error {
 	// request:
 	// 000: 43 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 C...............
 	// 010: 00 00 00 1b 00 00 00 02 00 00 00 00 00 00 00    ...............
@@ -773,8 +920,18 @@ func StartScan(dev io.ReadWriter) error {
 	return err
 }
 
-// GetPixelSize requests the pixel size of the object being scanned.
-func GetPixelSize(dev io.ReadWriter) error {
+// pixelSize retrieves the scanned image dimensions using a vendor-specific READ.
+//
+// This function uses the READ command (0x28) with data type code 0x80 (vendor-specific)
+// to query the actual pixel dimensions of the current scan. The response contains:
+//   - scan_x: width in pixels (4960 for 600 dpi)
+//   - scan_y: height in scan lines (7016 maximum)
+//   - paper_w: paper width detected
+//   - paper_l: paper length detected
+//
+// These values determine the number of bytes per scan line (width × 3 for RGB)
+// and the total image size.
+func pixelSize(dev io.ReadWriter) error {
 	// request:
 	// 000: 43 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 C...............
 	// 010: 00 00 00 28 00 80 00 00 00 00 00 20 00 00 00    ...(....... ...
@@ -811,8 +968,14 @@ func GetPixelSize(dev io.ReadWriter) error {
 	return err
 }
 
-// TODO: document Ric
-func Ric(dev io.ReadWriter, side int) error {
+// checkImageReady verifies that image data is ready for reading using a vendor-specific control command.
+//
+// This vendor-specific SCANNER_CONTROL command (0xf1) with function code 0x10 queries
+// whether the scanner has buffered image data available for the specified window ID
+// (0x00 for front, 0x80 for back). The function retries up to 120 times with a 500ms
+// delay to wait for data to become available, which is necessary because scanning and
+// data transfer happen asynchronously.
+func checkImageReady(dev io.ReadWriter, side int) error {
 	// request:
 	// 000: 43 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 C...............
 	// 010: 00 00 00 f1 10 00 00 00 00 03 dc 20 00 00 00    ........... ...
@@ -841,15 +1004,23 @@ func Ric(dev io.ReadWriter, side int) error {
 		if err == nil {
 			break
 		}
-		log.Printf("error = %v, retrying (%d of 120)", err, tries)
+		log.Printf("checkImageReady error = %v, retrying (%d of 120)", err, tries)
 		time.Sleep(500 * time.Millisecond)
 	}
 	return err
 }
 
-// ReadData reads data from the front of the page (side == 0) or the
-// back of the page (side == 1).
-func ReadData(dev io.ReadWriter, side int) (*Response, error) {
+// readData retrieves scanned image data using the READ command.
+//
+// The SCSI READ command (0x28) is mandatory for scanner devices and transfers
+// image data from the scanner to the host. The data type code 0x00 indicates
+// image data, and the data type qualifier (window ID) specifies which scanning
+// window to read from: 0x00 for front side, 0x80 for back side.
+//
+// The transfer length specifies how many bytes to read (252,960 bytes = 252KB chunk).
+// Multiple READ commands may be necessary to retrieve a complete image. The function
+// inverts the pixel values (255 - value) as the scanner returns inverted data.
+func readData(dev io.ReadWriter, side int) (*response, error) {
 	// request:
 	// 000: 43 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 C...............
 	// 010: 00 00 00 28 00 00 00 00 00 03 dc 20 00 00 00    ...(....... ...
@@ -879,8 +1050,8 @@ func ReadData(dev io.ReadWriter, side int) (*Response, error) {
 		return resp, err
 	}
 
-	for i := 0; i < len(resp.Extra); i++ {
-		resp.Extra[i] = 255 - resp.Extra[i] // invert
+	for i := 0; i < len(resp.extra); i++ {
+		resp.extra[i] = 255 - resp.extra[i] // invert
 	}
 
 	return resp, err

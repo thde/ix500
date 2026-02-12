@@ -5,28 +5,52 @@ import (
 	"fmt"
 )
 
+// senseCode represents a SCSI error classification using ASC and ASCQ.
+//
+// In the SCSI REQUEST SENSE response, the Additional Sense Code (ASC) and
+// Additional Sense Code Qualifier (ASCQ) provide detailed information about
+// error conditions. Together they form a hierarchical error code where ASC
+// identifies the error category and ASCQ provides specific details within
+// that category.
 type senseCode struct {
 	code      byte // additional sense code (asc)
 	qualifier byte // additional sense code qualifier (ascq)
 }
 
+// SCSI sense key values define the general category of error conditions.
+// These are standard values defined in the SCSI-2 specification.
 const (
-	noSense byte = iota
-	recoveredError
-	notReady
-	mediumError
-	hardwareError
-	illegalRequest
-	unitAttention
-	dataProtect
-	firmwareError
-	_
-	abortedCommand
-	equal
-	volumeOverflow
-	miscompare
+	noSense         byte = iota // No error or special condition
+	recoveredError              // Error recovered by device (data valid)
+	notReady                    // Device is not ready for operation
+	mediumError                 // Medium-related error (paper jam, etc.)
+	hardwareError               // Hardware malfunction detected
+	illegalRequest              // Invalid command or parameter
+	unitAttention               // Device state changed (reset, power event)
+	dataProtect                 // Write-protected or access denied
+	firmwareError               // Firmware or vendor-specific error
+	_                           // Reserved
+	abortedCommand              // Command was aborted
+	equal                       // SEARCH DATA satisfied (not used in scanners)
+	volumeOverflow              // Buffer overflow condition
+	miscompare                  // Verify operation found mismatch
 )
 
+// requestSenseToError converts SCSI REQUEST SENSE response data into a Go error.
+//
+// This function interprets the three-level SCSI error hierarchy:
+//  1. Sense Key - general error category (e.g., mediumError, hardwareError)
+//  2. ASC (Additional Sense Code) - specific error type
+//  3. ASCQ (Additional Sense Code Qualifier) - detailed error variant
+//
+// Additional parameters provide context:
+//   - rsInfo: Information bytes (typically the residue count for short reads)
+//   - rsEom: End of Medium flag, set when reaching end of paper
+//   - rsIli: Incorrect Length Indicator, set when actual transfer length differs from requested
+//
+// The function maps Fujitsu-specific vendor codes (ASC 0x80) to meaningful errors
+// like paper jams, hopper empty, and button presses. It returns nil for successful
+// operations (noSense with ASC 0x00 or 0x80).
 func requestSenseToError(sense byte, asc byte, ascq byte, rsInfo []byte, rsEom bool, rsIli bool) error {
 	switch sense {
 	case noSense:

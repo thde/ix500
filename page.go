@@ -10,16 +10,40 @@ import (
 	"time"
 )
 
-// Page represents one scanned side with its image data.
-// Embeds image.Image for direct use as an image.
+// Side represents the side of a sheet.
+type Side int
+
+const (
+	// FrontSide indicates the front side of the sheet.
+	Front Side = iota
+	// BackSide indicates the back side of the sheet.
+	Back
+)
+
+// Page represents a single scanned side of a document.
+// It embeds [image.Image], allowing it to be used directly as an image.
 type Page struct {
-	image.Image     // The scanned image (embedded)
-	Side        int // 0=front, 1=back
-	Sheet       int // Sheet number (for reordering)
+	image.Image
+	// Side indicates which side of the sheet this page represents.
+	// 0 usually denotes the front side, and 1 denotes the back side.
+	Side Side
+	// Sheet indicates the index of the sheet in the scanning sequence.
+	// Note that scanners may scan the last sheet first.
+	Sheet int
 }
 
-// streamingReader wraps the readSide logic to return an io.Reader
-// that streams RGB data chunks as they're received.
+// streamingReader implements [io.Reader] for scanner image data retrieval.
+//
+// The iX500 returns image data in chunks via the READ command. This reader
+// abstracts the chunk-based retrieval into a continuous stream suitable for
+// progressive image decoding. It handles:
+//   - Issuing ric (read image check) commands to verify data availability
+//   - Executing READ commands to retrieve data chunks
+//   - Retrying on ErrTemporaryNoData when the scanner needs more time
+//   - Detecting ErrEndOfPaper to signal EOF
+//
+// The scanner processes and transfers data asynchronously, so reads may block
+// waiting for the next chunk to become available.
 type streamingReader struct {
 	ctx      context.Context
 	scanner  *Scanner
@@ -29,6 +53,12 @@ type streamingReader struct {
 	offset   int
 }
 
+// Read implements [io.Reader] for streaming image data from the scanner.
+//
+// This method returns data from previously fetched chunks or, when exhausted,
+// issues ric (read image check) and readData commands to retrieve the next chunk.
+// It retries automatically when the scanner returns ErrTemporaryNoData and
+// returns io.EOF when the scanner signals ErrEndOfPaper.
 func (r *streamingReader) Read(p []byte) (n int, err error) {
 	for {
 		// If we have a current chunk, read from it
@@ -50,24 +80,24 @@ func (r *streamingReader) Read(p []byte) (n int, err error) {
 			return 0, r.ctx.Err()
 		}
 
-		// Ric with retry
+		// Check image ready with retry
 		var ricErr error
 		for i := 0; i < r.scanner.opts.RicRetries; i++ {
 			if r.ctx.Err() != nil {
 				return 0, r.ctx.Err()
 			}
-			ricErr = Ric(r.scanner.dev, r.side)
+			ricErr = checkImageReady(r.scanner.dev, r.side)
 			if ricErr == nil {
 				break
 			}
 			time.Sleep(r.scanner.opts.DataPollInterval)
 		}
 		if ricErr != nil {
-			return 0, fmt.Errorf("ric: %w", ricErr)
+			return 0, fmt.Errorf("check image ready: %w", ricErr)
 		}
 
 		// Read data
-		resp, err := ReadData(r.scanner.dev, r.side)
+		resp, err := readData(r.scanner.dev, r.side)
 		if errors.Is(err, ErrTemporaryNoData) {
 			time.Sleep(r.scanner.opts.DataPollInterval)
 			continue
@@ -79,14 +109,23 @@ func (r *streamingReader) Read(p []byte) (n int, err error) {
 			return 0, fmt.Errorf("read data: %w", err)
 		}
 
-		if len(resp.Extra) > 0 {
-			r.chunks = append(r.chunks, resp.Extra)
+		if len(resp.extra) > 0 {
+			r.chunks = append(r.chunks, resp.extra)
 		}
 	}
 }
 
-// imageFromReader creates an image from streaming RGB data.
-// Reads data incrementally, building the image row by row.
+// imageFromReader decodes raw RGB image data into an image.Image.
+//
+// The iX500 at 600 dpi produces images with fixed dimensions:
+//   - Width: 4,960 pixels (8.27 inches × 600 dpi)
+//   - Maximum height: 7,016 pixels (11.69 inches × 600 dpi)
+//   - Format: 24-bit RGB, 3 bytes per pixel, 14,880 bytes per scan line
+//
+// The function reads row-by-row, constructing an RGBA image. It handles variable
+// document heights by detecting EOF and cropping the final image to the actual
+// number of scan lines received. The scanner may return fewer lines than the
+// maximum for shorter documents.
 func imageFromReader(r io.Reader) (image.Image, error) {
 	const (
 		width        = 4960
