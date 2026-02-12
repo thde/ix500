@@ -834,7 +834,7 @@ func Ric(dev io.ReadWriter, side int) error {
 		windowID = 0x80
 	}
 	var err error
-	for tries := 0; tries < 120; tries++ {
+	for tries := range 120 {
 		_, err = do(dev, &request{
 			cmd: []byte{
 				0xf1, // SCSI opcode: SCANNER_CONTROL
