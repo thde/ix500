@@ -52,13 +52,6 @@ func defaultOptions() Options {
 	}
 }
 
-// FindScanner discovers and opens a connected Fujitsu ScanSnap iX500 device.
-// It returns an io.ReadWriteCloser that can be used to communicate with the device.
-// The caller is responsible for closing the returned device.
-func FindScanner() (io.ReadWriteCloser, error) {
-	return FindDevice()
-}
-
 // New creates a new Scanner instance wrapping the provided USB device.
 // The opts parameter can be nil to use default options.
 // The caller is responsible for closing the underlying device via the Close method
