@@ -45,12 +45,14 @@ type Page struct {
 // The scanner processes and transfers data asynchronously, so reads may block
 // waiting for the next chunk to become available.
 type streamingReader struct {
-	ctx      context.Context
-	scanner  *Scanner
-	side     int
-	chunks   [][]byte
-	chunkIdx int
-	offset   int
+	ctx              context.Context
+	dev              *device
+	side             int
+	dataPollInterval time.Duration
+	ricRetries       int
+	chunks           [][]byte
+	chunkIdx         int
+	offset           int
 }
 
 // Read implements [io.Reader] for streaming image data from the scanner.
@@ -82,24 +84,24 @@ func (r *streamingReader) Read(p []byte) (n int, err error) {
 
 		// Check image ready with retry
 		var ricErr error
-		for i := 0; i < r.scanner.opts.RicRetries; i++ {
+		for i := 0; i < r.ricRetries; i++ {
 			if r.ctx.Err() != nil {
 				return 0, r.ctx.Err()
 			}
-			ricErr = checkImageReady(r.scanner.dev, r.side)
+			ricErr = r.dev.checkImageReady(r.side)
 			if ricErr == nil {
 				break
 			}
-			time.Sleep(r.scanner.opts.DataPollInterval)
+			time.Sleep(r.dataPollInterval)
 		}
 		if ricErr != nil {
 			return 0, fmt.Errorf("check image ready: %w", ricErr)
 		}
 
 		// Read data
-		resp, err := readData(r.scanner.dev, r.side)
+		resp, err := r.dev.readData(r.side)
 		if errors.Is(err, ErrTemporaryNoData) {
-			time.Sleep(r.scanner.opts.DataPollInterval)
+			time.Sleep(r.dataPollInterval)
 			continue
 		}
 		if errors.Is(err, ErrEndOfPaper) {

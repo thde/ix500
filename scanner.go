@@ -12,7 +12,7 @@ import (
 // Scanner manages the lifecycle and operations of a Fujitsu ScanSnap iX500 scanner.
 // It handles initialization, button polling, and scanning operations.
 type Scanner struct {
-	dev         io.ReadWriteCloser
+	dev         *device
 	initialized bool
 	opts        Options
 }
@@ -58,7 +58,7 @@ func defaultOptions() Options {
 // when the scanner is no longer needed.
 func New(dev io.ReadWriteCloser, opts *Options) *Scanner {
 	s := &Scanner{
-		dev:  dev,
+		dev:  &device{dev: dev},
 		opts: defaultOptions(),
 	}
 	if opts != nil {
@@ -100,32 +100,32 @@ func (s *Scanner) Initialize(ctx context.Context) error {
 
 	steps := []struct {
 		name string
-		fn   func(io.ReadWriter) error
+		fn   func() error
 	}{
-		{"inquire", inquire},
-		{"preread", preread},
-		{"mode_select_auto", modeSelectAuto},
-		{"mode_select_double_feed", modeSelectDoubleFeed},
-		{"mode_select_background", modeSelectBackground},
-		{"mode_select_dropout", modeSelectDropout},
-		{"mode_select_buffering", modeSelectBuffering},
-		{"mode_select_prepick", modeSelectPrepick},
-		{"set_window", setWindow},
-		{"send_lut", sendLUT},
-		{"send_qtable", sendQTable},
-		{"lamp_on", lampOn},
+		{"inquire", s.dev.inquire},
+		{"preread", s.dev.preread},
+		{"mode_select_auto", s.dev.modeSelectAuto},
+		{"mode_select_double_feed", s.dev.modeSelectDoubleFeed},
+		{"mode_select_background", s.dev.modeSelectBackground},
+		{"mode_select_dropout", s.dev.modeSelectDropout},
+		{"mode_select_buffering", s.dev.modeSelectBuffering},
+		{"mode_select_prepick", s.dev.modeSelectPrepick},
+		{"set_window", s.dev.setWindow},
+		{"send_lut", s.dev.sendLUT},
+		{"send_qtable", s.dev.sendQTable},
+		{"lamp_on", s.dev.lampOn},
 	}
 
 	for _, step := range steps {
 		if ctx.Err() != nil {
 			return ctx.Err()
 		}
-		if err := step.fn(s.dev); err != nil {
+		if err := step.fn(); err != nil {
 			return fmt.Errorf("%s: %w", step.name, err)
 		}
 	}
 
-	if _, err := hardwareStatus(s.dev); err != nil {
+	if _, err := s.dev.hardwareStatus(); err != nil {
 		return fmt.Errorf("get_hardware_status: %w", err)
 	}
 
@@ -136,7 +136,7 @@ func (s *Scanner) Initialize(ctx context.Context) error {
 // IsButtonPressed checks if the scan button is currently pressed.
 // It performs a non-blocking check of the hardware status.
 func (s *Scanner) IsButtonPressed(ctx context.Context) (bool, error) {
-	status, err := hardwareStatus(s.dev)
+	status, err := s.dev.hardwareStatus()
 	if err != nil {
 		return false, err
 	}
@@ -155,7 +155,7 @@ func (s *Scanner) WaitForButton(ctx context.Context) error {
 		case <-ctx.Done():
 			return ctx.Err()
 		case <-ticker.C:
-			status, err := hardwareStatus(s.dev)
+			status, err := s.dev.hardwareStatus()
 			if err != nil {
 				return err
 			}
@@ -197,7 +197,7 @@ func (s *Scanner) Scan(ctx context.Context) iter.Seq2[*Page, error] {
 			}
 
 			// Load next sheet
-			if err := objectPosition(s.dev); err != nil {
+			if err := s.dev.objectPosition(); err != nil {
 				if errors.Is(err, ErrHopperEmpty) {
 					if sheetNum == 0 {
 						yield(nil, ErrNoDocument)
@@ -209,13 +209,13 @@ func (s *Scanner) Scan(ctx context.Context) iter.Seq2[*Page, error] {
 			}
 
 			// Start scan
-			if err := startScan(s.dev); err != nil {
+			if err := s.dev.startScan(); err != nil {
 				yield(nil, fmt.Errorf("start scan: %w", err))
 				return
 			}
 
 			// Get pixel size
-			if err := pixelSize(s.dev); err != nil {
+			if err := s.dev.pixelSize(); err != nil {
 				yield(nil, fmt.Errorf("get pixel size: %w", err))
 				return
 			}
@@ -229,9 +229,11 @@ func (s *Scanner) Scan(ctx context.Context) iter.Seq2[*Page, error] {
 
 				// Create streaming reader for this side
 				reader := &streamingReader{
-					ctx:     ctx,
-					scanner: s,
-					side:    side,
+					ctx:              ctx,
+					dev:              s.dev,
+					side:             side,
+					dataPollInterval: s.opts.DataPollInterval,
+					ricRetries:       s.opts.RicRetries,
 				}
 
 				// Convert to image while streaming
