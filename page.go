@@ -5,7 +5,6 @@ import (
 	"errors"
 	"fmt"
 	"image"
-	"image/color"
 	"io"
 	"time"
 )
@@ -71,6 +70,7 @@ func (r *streamingReader) Read(p []byte) (n int, err error) {
 			copy(p, chunk[r.offset:r.offset+toCopy])
 			r.offset += toCopy
 			if r.offset >= len(chunk) {
+				r.chunks[r.chunkIdx] = nil // allow GC
 				r.chunkIdx++
 				r.offset = 0
 			}
@@ -157,14 +157,14 @@ func imageFromReader(r io.Reader) (image.Image, error) {
 			// End of data - actual height is y
 			if n > 0 {
 				// Process partial row
+				pixOffset := y * img.Stride
 				for x := 0; x < n/3; x++ {
-					offset := x * 3
-					img.Set(x, y, color.RGBA{
-						R: rowBuf[offset],
-						G: rowBuf[offset+1],
-						B: rowBuf[offset+2],
-						A: 255,
-					})
+					srcOff := x * 3
+					dstOff := pixOffset + x*4
+					img.Pix[dstOff] = rowBuf[srcOff]
+					img.Pix[dstOff+1] = rowBuf[srcOff+1]
+					img.Pix[dstOff+2] = rowBuf[srcOff+2]
+					img.Pix[dstOff+3] = 255
 				}
 				y++
 			}
@@ -175,14 +175,14 @@ func imageFromReader(r io.Reader) (image.Image, error) {
 		}
 
 		// Convert row to image pixels
+		pixOffset := y * img.Stride
 		for x := range width {
-			offset := x * 3
-			img.Set(x, y, color.RGBA{
-				R: rowBuf[offset],
-				G: rowBuf[offset+1],
-				B: rowBuf[offset+2],
-				A: 255,
-			})
+			srcOff := x * 3
+			dstOff := pixOffset + x*4
+			img.Pix[dstOff] = rowBuf[srcOff]
+			img.Pix[dstOff+1] = rowBuf[srcOff+1]
+			img.Pix[dstOff+2] = rowBuf[srcOff+2]
+			img.Pix[dstOff+3] = 255
 		}
 		y++
 	}
@@ -190,10 +190,10 @@ func imageFromReader(r io.Reader) (image.Image, error) {
 	// Crop to actual height
 	if y < height {
 		cropped := image.NewRGBA(image.Rect(0, 0, width, y))
-		for cy := 0; cy < y; cy++ {
-			for cx := range width {
-				cropped.Set(cx, cy, img.At(cx, cy))
-			}
+		rowBytes := width * 4
+		for cy := range y {
+			copy(cropped.Pix[cy*cropped.Stride:cy*cropped.Stride+rowBytes],
+				img.Pix[cy*img.Stride:cy*img.Stride+rowBytes])
 		}
 		return cropped, nil
 	}
