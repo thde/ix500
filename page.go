@@ -88,20 +88,28 @@ func (r *streamingReader) Read(p []byte) (n int, err error) {
 			if r.ctx.Err() != nil {
 				return 0, r.ctx.Err()
 			}
-			ricErr = r.dev.checkImageReady(r.side)
+			ricErr = r.dev.checkImageReady(r.ctx, r.side)
 			if ricErr == nil {
 				break
 			}
-			time.Sleep(r.dataPollInterval)
+			select {
+			case <-r.ctx.Done():
+				return 0, r.ctx.Err()
+			case <-time.After(r.dataPollInterval):
+			}
 		}
 		if ricErr != nil {
 			return 0, fmt.Errorf("check image ready: %w", ricErr)
 		}
 
 		// Read data
-		resp, err := r.dev.readData(r.side)
+		resp, err := r.dev.readData(r.ctx, r.side)
 		if errors.Is(err, ErrTemporaryNoData) {
-			time.Sleep(r.dataPollInterval)
+			select {
+			case <-r.ctx.Done():
+				return 0, r.ctx.Err()
+			case <-time.After(r.dataPollInterval):
+			}
 			continue
 		}
 		if errors.Is(err, ErrEndOfPaper) {

@@ -24,11 +24,10 @@
 package ix500
 
 import (
+	"context"
 	"encoding/binary"
 	"errors"
 	"io"
-	"log"
-	"time"
 )
 
 var (
@@ -115,12 +114,18 @@ type response struct {
 // the response data and USB status response. It does not check the status byte
 // or issue REQUEST SENSE on error. This is used internally by do() and for the
 // REQUEST SENSE command itself (to avoid infinite recursion).
-func (d *device) doWithoutRequestSense(r *request) (*response, error) {
+func (d *device) doWithoutRequestSense(ctx context.Context, r *request) (*response, error) {
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
 	if _, err := d.dev.Write(usbcmd(r.cmd)); err != nil {
 		return nil, err
 	}
 
 	if r.extra != nil {
+		if err := ctx.Err(); err != nil {
+			return nil, err
+		}
 		if _, err := d.dev.Write(r.extra); err != nil {
 			return nil, err
 		}
@@ -129,6 +134,9 @@ func (d *device) doWithoutRequestSense(r *request) (*response, error) {
 	var resp response
 
 	if r.respLen > 0 {
+		if err := ctx.Err(); err != nil {
+			return nil, err
+		}
 		resp.extra = make([]byte, r.respLen)
 		num, err := d.dev.Read(resp.extra)
 		if err != nil {
@@ -138,6 +146,9 @@ func (d *device) doWithoutRequestSense(r *request) (*response, error) {
 
 	}
 
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
 	resp.raw = make([]byte, 32)
 	num, err := d.dev.Read(resp.raw)
 	if err != nil {
@@ -158,8 +169,8 @@ func (d *device) doWithoutRequestSense(r *request) (*response, error) {
 // The REQUEST SENSE response also includes the ILI (Incorrect Length Indicator)
 // and EOM (End of Medium) flags, which are used to adjust the returned data
 // length and signal end-of-paper conditions.
-func (d *device) do(r *request) (*response, error) {
-	resp, err := d.doWithoutRequestSense(r)
+func (d *device) do(ctx context.Context, r *request) (*response, error) {
+	resp, err := d.doWithoutRequestSense(ctx, r)
 	if err != nil {
 		return nil, err
 	}
@@ -169,7 +180,7 @@ func (d *device) do(r *request) (*response, error) {
 		return resp, nil
 	}
 
-	rsResp, err := d.doWithoutRequestSense(&request{
+	rsResp, err := d.doWithoutRequestSense(ctx, &request{
 		cmd: []byte{
 			// see http://self.gutenberg.org/articles/scsi_request_sense_command
 			0x03, // SCSI opcode: REQUEST SENSE
@@ -211,13 +222,13 @@ func (d *device) do(r *request) (*response, error) {
 // device information including the device type (0x06 for scanner devices),
 // vendor identification, product identification, and product revision level.
 // The iX500 returns "FUJITSU" as vendor and "ScanSnap iX500" as product.
-func (d *device) inquire() error {
+func (d *device) inquire(ctx context.Context) error {
 	// request:
 	// 000: 43 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 C...............
 	// 010: 00 00 00 12 00 00 00 60 00 00 00 00 00 00 00    .......`.......
 
 	// TODO: verify the scanner make and model in resp.extra?
-	_, err := d.do(&request{
+	_, err := d.do(ctx, &request{
 		cmd: []byte{
 			0x12, // SCSI opcode: INQUIRY
 			0x00, // EVPD (enable vital product data): disabled
@@ -247,7 +258,7 @@ func (d *device) inquire() error {
 // scanning. It sets both x and y resolution to 600 dpi (0x0258) and configures
 // the paper width and length in units of 1/1200 inch. The composition byte (0x05)
 // specifies the image format.
-func (d *device) preread() error {
+func (d *device) preread(ctx context.Context) error {
 	// request:
 	// 000: 43 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 C...............
 	// 010: 00 00 00 1d 00 00 00 20 00 00 00 00 00 00 00    ....... .......
@@ -279,7 +290,7 @@ func (d *device) preread() error {
 		0x00,
 	)
 
-	_, err := d.do(&request{
+	_, err := d.do(ctx, &request{
 		cmd: []byte{
 			0x1d, // SCSI opcode: SEND_DIAGNOSTIC
 			0x00, // page format (bit 4): disabled
@@ -303,7 +314,7 @@ func (d *device) preread() error {
 // via mode pages. This function sends a vendor-specific mode page to enable
 // automatic paper feeding with deskew (0x3c) and overscan (0x06) settings.
 // The page format bit (0x10) is set to use the SCSI-2 page format.
-func (d *device) modeSelectAuto() error {
+func (d *device) modeSelectAuto(ctx context.Context) error {
 	// request:
 	// 000: 43 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 C...............
 	// 010: 00 00 00 15 10 00 00 0c 00 00 00 00 00 00 00    ...............
@@ -311,7 +322,7 @@ func (d *device) modeSelectAuto() error {
 	// extra request:
 	// 000: 00 00 00 00 3c 06 00 00 00 00 00 00             ....<.......
 
-	_, err := d.do(&request{
+	_, err := d.do(ctx, &request{
 		cmd: []byte{
 			0x15, // SCSI opcode: mode select
 			0x10, // page format (bit 4): enabled
@@ -345,7 +356,7 @@ func (d *device) modeSelectAuto() error {
 // Double feed detection is a feature that alerts when multiple sheets of paper
 // are fed through the scanner simultaneously. This function uses MODE SELECT (0x15)
 // with a vendor-specific mode page (0x38, 0x06) to enable this hardware capability.
-func (d *device) modeSelectDoubleFeed() error {
+func (d *device) modeSelectDoubleFeed(ctx context.Context) error {
 	// request:
 	// 000: 43 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 C...............
 	// 010: 00 00 00 15 10 00 00 0c 00 00 00 00 00 00 00    ...............
@@ -353,7 +364,7 @@ func (d *device) modeSelectDoubleFeed() error {
 	// extra request:
 	// 000: 00 00 00 00 38 06 00 00 00 00 00 00             ....8.......
 
-	_, err := d.do(&request{
+	_, err := d.do(ctx, &request{
 		cmd: []byte{
 			0x15, // SCSI opcode: mode select
 			0x10, // page format (bit 4): enabled
@@ -387,7 +398,7 @@ func (d *device) modeSelectDoubleFeed() error {
 // This function sets the scanner's background color processing mode, which affects
 // how the scanner interprets the area around the document. The vendor-specific
 // mode page (0x37, 0x06) controls this image processing feature.
-func (d *device) modeSelectBackground() error {
+func (d *device) modeSelectBackground(ctx context.Context) error {
 	// request:
 	// 000: 43 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 C...............
 	// 010: 00 00 00 15 10 00 00 0c 00 00 00 00 00 00 00    ...............
@@ -395,7 +406,7 @@ func (d *device) modeSelectBackground() error {
 	// extra request:
 	// 000: 00 00 00 00 37 06 00 00 00 00 00 00             ....7.......
 
-	_, err := d.do(&request{
+	_, err := d.do(ctx, &request{
 		cmd: []byte{
 			0x15, // SCSI opcode: mode select
 			0x10, // page format (bit 4): enabled
@@ -430,7 +441,7 @@ func (d *device) modeSelectBackground() error {
 // green, or blue) from the scanned image. This is useful for removing colored
 // forms or annotations. This function uses a vendor-specific mode page (0x39, 0x08)
 // to configure the dropout settings.
-func (d *device) modeSelectDropout() error {
+func (d *device) modeSelectDropout(ctx context.Context) error {
 	// request:
 	// 000: 43 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 C...............
 	// 010: 00 00 00 15 10 00 00 0e 00 00 00 00 00 00 00    ...............
@@ -438,7 +449,7 @@ func (d *device) modeSelectDropout() error {
 	// extra request:
 	// 000: 00 00 00 00 39 08 00 00 00 00 00 00 00 00       ....9.........
 
-	_, err := d.do(&request{
+	_, err := d.do(ctx, &request{
 		cmd: []byte{
 			0x15, // SCSI opcode: mode select
 			0x10, // page format (bit 4): enabled
@@ -475,7 +486,7 @@ func (d *device) modeSelectDropout() error {
 // before transferring it to the host. This can improve scanning performance by
 // allowing the scanner to continue scanning while previous data is being transferred.
 // The mode page (0x3a, 0x06) with values 0x80, 0xc0 enables this feature.
-func (d *device) modeSelectBuffering() error {
+func (d *device) modeSelectBuffering(ctx context.Context) error {
 	// request:
 	// 000: 43 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 C...............
 	// 010: 00 00 00 15 10 00 00 0c 00 00 00 00 00 00 00    ...............
@@ -483,7 +494,7 @@ func (d *device) modeSelectBuffering() error {
 	// extra request:
 	// 000: 00 00 00 00 3a 06 80 c0 00 00 00 00             ....:.......
 
-	_, err := d.do(&request{
+	_, err := d.do(ctx, &request{
 		cmd: []byte{
 			0x15, // SCSI opcode: mode select
 			0x10, // page format (bit 4): enabled
@@ -517,7 +528,7 @@ func (d *device) modeSelectBuffering() error {
 // Prepick is a feature where the scanner prepares the next sheet of paper while
 // scanning the current one, reducing the time between scans. This function uses
 // a vendor-specific mode page (0x33, 0x06) to enable this performance optimization.
-func (d *device) modeSelectPrepick() error {
+func (d *device) modeSelectPrepick(ctx context.Context) error {
 	// request:
 	// 000: 43 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 C...............
 	// 010: 00 00 00 15 10 00 00 0c 00 00 00 00 00 00 00    ...............
@@ -525,7 +536,7 @@ func (d *device) modeSelectPrepick() error {
 	// extra request:
 	// 000: 00 00 00 00 33 06 00 00 00 00 00 00             ....3.......
 
-	_, err := d.do(&request{
+	_, err := d.do(ctx, &request{
 		cmd: []byte{
 			0x15, // SCSI opcode: mode select
 			0x10, // page format (bit 4): enabled
@@ -566,7 +577,7 @@ func (d *device) modeSelectPrepick() error {
 //
 // The iX500 uses window ID 0x00 for the front side and 0x80 for the back side
 // when scanning in duplex mode.
-func (d *device) setWindow() error {
+func (d *device) setWindow(ctx context.Context) error {
 	// request:
 	// 000: 43 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 C...............
 	// 010: 00 00 00 24 00 00 00 00 00 00 00 88 00 00 00    ...$...........
@@ -582,7 +593,7 @@ func (d *device) setWindow() error {
 	// 070: c1 80 01 00 00 00 00 00 00 00 00 00 00 00 00 00 ................
 	// 080: 00 00 00 00 00 00 00 00                         ........
 
-	_, err := d.do(&request{
+	_, err := d.do(ctx, &request{
 		cmd: []byte{
 			0x24, // SCSI opcode: set window
 			0x00, // reserved
@@ -619,7 +630,7 @@ func (d *device) setWindow() error {
 // gamma correction or other pixel value transformations. The LUT maps input
 // pixel values (0-255) to output values, allowing for image enhancement.
 // This implementation sends an identity LUT (input = output).
-func (d *device) sendLUT() error {
+func (d *device) sendLUT(ctx context.Context) error {
 	// request:
 	// 000: 43 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 C...............
 	// 010: 00 00 00 2a 00 83 00 00 00 00 01 0a 00 00 00    ...*...........
@@ -643,7 +654,7 @@ func (d *device) sendLUT() error {
 	// 0f0: e5 e6 e7 e8 e9 ea eb ec ed ee ef f0 f1 f2 f3 f4 ................
 	// 100: f5 f6 f7 f8 f9 fa fb fc fd fe                   ..........
 
-	_, err := d.do(&request{
+	_, err := d.do(ctx, &request{
 		cmd: []byte{
 			0x2a, // SCSI opcode: SEND
 			0x00, // reserved
@@ -687,7 +698,7 @@ func (d *device) sendLUT() error {
 // and compression ratio. The data type code 0x88 indicates a vendor-specific
 // quantization table. The tables contain the quantization values for the
 // luminance and chrominance components of the JPEG encoder.
-func (d *device) sendQTable() error {
+func (d *device) sendQTable(ctx context.Context) error {
 	// request:
 	// 000: 43 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 C...............
 	// 010: 00 00 00 2a 00 88 00 00 00 00 00 8a 00 00 00    ...*...........
@@ -703,7 +714,7 @@ func (d *device) sendQTable() error {
 	// 070: 1d 1d 1d 1d 1d 1d 1d 1d 1d 1d 1d 1d 1d 1d 1d 1d ................
 	// 080: 1d 1d 1d 1d 1d 1d 1d 1d 1d 1d                   ..........
 
-	_, err := d.do(&request{
+	_, err := d.do(ctx, &request{
 		cmd: []byte{
 			0x2a, // SCSI opcode: SEND
 			0x00, // reserved
@@ -739,12 +750,12 @@ func (d *device) sendQTable() error {
 // The scan control function byte 0x05 specifically requests lamp activation.
 // The scanner's lamp must be on and warmed up before scanning to ensure proper
 // illumination and image quality.
-func (d *device) lampOn() error {
+func (d *device) lampOn(ctx context.Context) error {
 	// request:
 	// 000: 43 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 C...............
 	// 010: 00 00 00 f1 05 00 00 00 00 00 00 00 00 00 00    ...............
 
-	_, err := d.do(&request{
+	_, err := d.do(ctx, &request{
 		cmd: []byte{
 			0xf1, // SCSI opcode: SCANNER_CONTROL
 			0x05, // scan control function: lamp on
@@ -843,7 +854,7 @@ func hardwareStatusFromBytes(b []byte) hwStatus {
 //   - Document skew angle (skewAngle)
 //
 // This is used to poll for button presses and verify the scanner is ready for operation.
-func (d *device) hardwareStatus() (hwStatus, error) {
+func (d *device) hardwareStatus(ctx context.Context) (hwStatus, error) {
 	// request:
 	// 000: 43 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 C...............
 	// 010: 00 00 00 c2 00 00 00 00 00 00 00 0c 00 00 00    ...............
@@ -851,7 +862,7 @@ func (d *device) hardwareStatus() (hwStatus, error) {
 	// extra request:
 	// 000: 00 00 00 00 00 01 00 00 00 00 00 00             ............
 
-	resp, err := d.do(&request{
+	resp, err := d.do(ctx, &request{
 		cmd: []byte{
 			0xc2, // SCSI opcode: GET_HW_STATUS
 			0x00,
@@ -880,12 +891,12 @@ func (d *device) hardwareStatus() (hwStatus, error) {
 // which causes the scanner to feed one sheet from the automatic document feeder (ADF)
 // into the scanning position. This command returns ErrHopperEmpty when no more
 // paper is available in the hopper.
-func (d *device) objectPosition() error {
+func (d *device) objectPosition(ctx context.Context) error {
 	// request:
 	// 000: 43 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 C...............
 	// 010: 00 00 00 31 01 00 00 00 00 00 00 00 00 00 00    ...1...........
 
-	_, err := d.do(&request{
+	_, err := d.do(ctx, &request{
 		cmd: []byte{
 			0x31, // SCSI opcode: OBJECT POSITION
 			0x01, // load object
@@ -909,12 +920,12 @@ func (d *device) objectPosition() error {
 // the scanning process for the previously defined windows. The transfer length
 // field indicates the number of window IDs being specified. This implementation
 // scans both front (0x00) and back (0x80) windows for duplex scanning.
-func (d *device) startScan() error {
+func (d *device) startScan(ctx context.Context) error {
 	// request:
 	// 000: 43 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 C...............
 	// 010: 00 00 00 1b 00 00 00 02 00 00 00 00 00 00 00    ...............
 
-	_, err := d.do(&request{
+	_, err := d.do(ctx, &request{
 		cmd: []byte{
 			0x1b, // SCSI opcode: SCAN
 			0x00, // reserved
@@ -942,7 +953,7 @@ func (d *device) startScan() error {
 //
 // These values determine the number of bytes per scan line (width × 3 for RGB)
 // and the total image size.
-func (d *device) pixelSize() error {
+func (d *device) pixelSize(ctx context.Context) error {
 	// request:
 	// 000: 43 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 C...............
 	// 010: 00 00 00 28 00 80 00 00 00 00 00 20 00 00 00    ...(....... ...
@@ -960,7 +971,7 @@ func (d *device) pixelSize() error {
 
 	// → bytes per line = scan_x * 3 (for color) = 14880
 
-	_, err := d.do(&request{
+	_, err := d.do(ctx, &request{
 		cmd: []byte{
 			0x28, // SCSI opcode: READ
 			0x00, // reserved
@@ -979,14 +990,11 @@ func (d *device) pixelSize() error {
 	return err
 }
 
-// checkImageReady verifies that image data is ready for reading using a vendor-specific control command.
-//
-// This vendor-specific SCANNER_CONTROL command (0xf1) with function code 0x10 queries
-// whether the scanner has buffered image data available for the specified window ID
-// (0x00 for front, 0x80 for back). The function retries up to 120 times with a 500ms
-// delay to wait for data to become available, which is necessary because scanning and
-// data transfer happen asynchronously.
-func (d *device) checkImageReady(side int) error {
+// checkImageReady issues a single SCANNER_CONTROL command (0xf1, function 0x10) to check
+// whether image data is ready for the specified window (0x00 for front, 0x80 for back).
+// It returns nil if data is available, or an error otherwise. Retry policy is the
+// caller's responsibility.
+func (d *device) checkImageReady(ctx context.Context, side int) error {
 	// request:
 	// 000: 43 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 C...............
 	// 010: 00 00 00 f1 10 00 00 00 00 03 dc 20 00 00 00    ........... ...
@@ -995,29 +1003,21 @@ func (d *device) checkImageReady(side int) error {
 	if side == 1 {
 		windowID = 0x80
 	}
-	var err error
-	for tries := range 120 {
-		_, err = d.do(&request{
-			cmd: []byte{
-				0xf1, // SCSI opcode: SCANNER_CONTROL
-				0x10,
-				windowID, // window id: front (back is 0x80)
-				0x00,
-				0x00,
+	_, err := d.do(ctx, &request{
+		cmd: []byte{
+			0xf1, // SCSI opcode: SCANNER_CONTROL
+			0x10,
+			windowID, // window id: front (back is 0x80)
+			0x00,
+			0x00,
 
-				0x00,
-				0x03,
-				0xdc,
-				0x20,
-				0x00,
-			},
-		})
-		if err == nil {
-			break
-		}
-		log.Printf("checkImageReady error = %v, retrying (%d of 120)", err, tries)
-		time.Sleep(500 * time.Millisecond)
-	}
+			0x00,
+			0x03,
+			0xdc,
+			0x20,
+			0x00,
+		},
+	})
 	return err
 }
 
@@ -1031,7 +1031,7 @@ func (d *device) checkImageReady(side int) error {
 // The transfer length specifies how many bytes to read (252,960 bytes = 252KB chunk).
 // Multiple READ commands may be necessary to retrieve a complete image. The function
 // inverts the pixel values (255 - value) as the scanner returns inverted data.
-func (d *device) readData(side int) (*response, error) {
+func (d *device) readData(ctx context.Context, side int) (*response, error) {
 	// request:
 	// 000: 43 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 C...............
 	// 010: 00 00 00 28 00 00 00 00 00 03 dc 20 00 00 00    ...(....... ...
@@ -1041,7 +1041,7 @@ func (d *device) readData(side int) (*response, error) {
 		windowID = 0x80
 	}
 
-	resp, err := d.do(&request{
+	resp, err := d.do(ctx, &request{
 		cmd: []byte{
 			0x28, // SCSI opcode: READ
 			0x00, // reserved

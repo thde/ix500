@@ -100,7 +100,7 @@ func (s *Scanner) Initialize(ctx context.Context) error {
 
 	steps := []struct {
 		name string
-		fn   func() error
+		fn   func(context.Context) error
 	}{
 		{"inquire", s.dev.inquire},
 		{"preread", s.dev.preread},
@@ -120,12 +120,12 @@ func (s *Scanner) Initialize(ctx context.Context) error {
 		if ctx.Err() != nil {
 			return ctx.Err()
 		}
-		if err := step.fn(); err != nil {
+		if err := step.fn(ctx); err != nil {
 			return fmt.Errorf("%s: %w", step.name, err)
 		}
 	}
 
-	if _, err := s.dev.hardwareStatus(); err != nil {
+	if _, err := s.dev.hardwareStatus(ctx); err != nil {
 		return fmt.Errorf("get_hardware_status: %w", err)
 	}
 
@@ -136,7 +136,7 @@ func (s *Scanner) Initialize(ctx context.Context) error {
 // IsButtonPressed checks if the scan button is currently pressed.
 // It performs a non-blocking check of the hardware status.
 func (s *Scanner) IsButtonPressed(ctx context.Context) (bool, error) {
-	status, err := s.dev.hardwareStatus()
+	status, err := s.dev.hardwareStatus(ctx)
 	if err != nil {
 		return false, err
 	}
@@ -155,7 +155,7 @@ func (s *Scanner) WaitForButton(ctx context.Context) error {
 		case <-ctx.Done():
 			return ctx.Err()
 		case <-ticker.C:
-			status, err := s.dev.hardwareStatus()
+			status, err := s.dev.hardwareStatus(ctx)
 			if err != nil {
 				return err
 			}
@@ -197,7 +197,7 @@ func (s *Scanner) Scan(ctx context.Context) iter.Seq2[*Page, error] {
 			}
 
 			// Load next sheet
-			if err := s.dev.objectPosition(); err != nil {
+			if err := s.dev.objectPosition(ctx); err != nil {
 				if errors.Is(err, ErrHopperEmpty) {
 					if sheetNum == 0 {
 						yield(nil, ErrNoDocument)
@@ -209,13 +209,13 @@ func (s *Scanner) Scan(ctx context.Context) iter.Seq2[*Page, error] {
 			}
 
 			// Start scan
-			if err := s.dev.startScan(); err != nil {
+			if err := s.dev.startScan(ctx); err != nil {
 				yield(nil, fmt.Errorf("start scan: %w", err))
 				return
 			}
 
 			// Get pixel size
-			if err := s.dev.pixelSize(); err != nil {
+			if err := s.dev.pixelSize(ctx); err != nil {
 				yield(nil, fmt.Errorf("get pixel size: %w", err))
 				return
 			}
