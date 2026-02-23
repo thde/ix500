@@ -74,6 +74,35 @@ func main() {
 	logger.Info("scanner daemon shutdown")
 }
 
+type encodeJob struct {
+	page *ix500.Page
+	path string
+}
+
+func startEncoder(cancel context.CancelCauseFunc, logger *slog.Logger) (chan<- encodeJob, <-chan struct{}) {
+	jobs := make(chan encodeJob, 1)
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		for job := range jobs {
+			if err := savePage(job.page, job.path); err != nil {
+				cancel(fmt.Errorf("save %s: %w", filepath.Base(job.path), err))
+				for range jobs {
+				}
+				return
+			}
+			bounds := job.page.Bounds()
+			logger.Info("page saved",
+				"file", filepath.Base(job.path),
+				"size", fmt.Sprintf("%dx%d", bounds.Dx(), bounds.Dy()),
+				"side", job.page.Side,
+				"sheet", job.page.Sheet,
+			)
+		}
+	}()
+	return jobs, done
+}
+
 func loop(ctx context.Context, cfg *Config, scn *ix500.Scanner, logger *slog.Logger) error {
 	for {
 		logger.Info("waiting for scan button press")
@@ -90,8 +119,11 @@ func loop(ctx context.Context, cfg *Config, scn *ix500.Scanner, logger *slog.Log
 		timestamp := time.Now().Format("20060102-150405")
 		logger.Info("scan button pressed")
 
+		encodeCtx, cancelEncode := context.WithCancelCause(ctx)
+		jobs, done := startEncoder(cancelEncode, logger)
+
 		pageNum := 0
-		for page, err := range scn.Scan(ctx) {
+		for page, err := range scn.Scan(encodeCtx) {
 			if err != nil {
 				logger.Error("scan error", "err", err)
 				break
@@ -100,14 +132,15 @@ func loop(ctx context.Context, cfg *Config, scn *ix500.Scanner, logger *slog.Log
 			filename := fmt.Sprintf("scan-%s-page-%03d.jpg", timestamp, pageNum)
 			path := filepath.Join(cfg.OutputDir, filename)
 
-			if err := savePage(page, path); err != nil {
-				logger.Error("save failed", "file", path, "err", err)
-				break
-			}
-
-			bounds := page.Bounds()
-			logger.Info("page saved", "file", filename, "size", fmt.Sprintf("%dx%d", bounds.Dx(), bounds.Dy()), "side", page.Side, "sheet", page.Sheet)
+			jobs <- encodeJob{page: page, path: path}
 			pageNum++
+		}
+		close(jobs)
+		<-done
+		cancelEncode(nil)
+
+		if err := context.Cause(encodeCtx); err != nil && err != ctx.Err() {
+			logger.Error("encode error", "err", err)
 		}
 
 		logger.Info("scan complete", "pages", pageNum)
