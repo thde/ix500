@@ -12,18 +12,14 @@ import (
 // Scanner manages the lifecycle and operations of a Fujitsu ScanSnap iX500 scanner.
 // It handles initialization, button polling, and scanning operations.
 type Scanner struct {
-	dev         *device
-	initialized bool
-	opts        Options
+	dev  *device
+	opts Options
 }
 
 var (
 	// ErrNoDocument is returned when an operation requires a document in the hopper,
 	// but none is detected.
 	ErrNoDocument = errors.New("no document in hopper")
-
-	// ErrNotInitialized is returned when scanning is attempted before calling Initialize.
-	ErrNotInitialized = errors.New("scanner not initialized")
 )
 
 // Options configures timing and retry behavior for Scanner operations.
@@ -91,13 +87,9 @@ func (s *Scanner) Close() error {
 //  6. SCANNER_CONTROL (lamp on) - activate scanning lamp
 //  7. GET_HW_STATUS - verify hardware readiness
 //
-// This method must be called successfully before WaitForButton or Scan.
-// It is idempotent; subsequent calls return immediately if already initialized.
+// The full command sequence runs on every call. It is safe to call again after
+// hardware errors or firmware resets to restore the scanner to a known state.
 func (s *Scanner) Initialize(ctx context.Context) error {
-	if s.initialized {
-		return nil // idempotent
-	}
-
 	steps := []struct {
 		name string
 		fn   func(context.Context) error
@@ -129,7 +121,6 @@ func (s *Scanner) Initialize(ctx context.Context) error {
 		return fmt.Errorf("get_hardware_status: %w", err)
 	}
 
-	s.initialized = true
 	return nil
 }
 
@@ -185,11 +176,6 @@ func (s *Scanner) WaitForButton(ctx context.Context) error {
 // sheet first. Callers can use Page.Sheet and Page.Side to reorder as needed.
 func (s *Scanner) Scan(ctx context.Context) iter.Seq2[*Page, error] {
 	return func(yield func(*Page, error) bool) {
-		if !s.initialized {
-			yield(nil, ErrNotInitialized)
-			return
-		}
-
 		for sheetNum := 0; ; sheetNum++ {
 			if ctx.Err() != nil {
 				yield(nil, ctx.Err())
