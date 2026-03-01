@@ -24,12 +24,15 @@ type Config struct {
 	OutputDir string
 	// LogLevel sets the logging verbosity (debug, info, warn, error).
 	LogLevel string
+	// Resolution sets the scanning resolution in DPI (150, 200, 300, 600).
+	Resolution int
 }
 
 func parseFlags() *Config {
 	cfg := &Config{}
 	flag.StringVar(&cfg.OutputDir, "out-dir", "/perm/scannyd", "Output directory")
 	flag.StringVar(&cfg.LogLevel, "log-level", "debug", "Log level (debug|info|warn|error)")
+	flag.IntVar(&cfg.Resolution, "dpi", 300, "Scanning resolution in DPI (150, 200, 300, 600)")
 	flag.Parse()
 	return cfg
 }
@@ -56,7 +59,7 @@ func main() {
 		os.Exit(1)
 	}
 
-	scn := ix500.New(dev, nil)
+	scn := ix500.New(dev, &ix500.Options{Resolution: ix500.Resolution(cfg.Resolution)})
 	defer scn.Close()
 
 	if err := scn.Initialize(ctx); err != nil {

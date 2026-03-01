@@ -16,11 +16,27 @@ type Scanner struct {
 	opts Options
 }
 
-var (
-	// ErrNoDocument is returned when an operation requires a document in the hopper,
-	// but none is detected.
-	ErrNoDocument = errors.New("no document in hopper")
+// ErrNoDocument is returned when an operation requires a document in the hopper,
+// but none is detected.
+var ErrNoDocument = errors.New("no document in hopper")
+
+// Resolution specifies the scanning resolution in dots per inch.
+type Resolution int
+
+const (
+	DPI150 Resolution = 150
+	DPI200 Resolution = 200
+	DPI300 Resolution = 300
+	DPI600 Resolution = 600
 )
+
+func (r Resolution) valid() bool {
+	switch r {
+	case DPI150, DPI200, DPI300, DPI600:
+		return true
+	}
+	return false
+}
 
 // Options configures timing and retry behavior for Scanner operations.
 type Options struct {
@@ -37,6 +53,10 @@ type Options struct {
 	// when waiting for image data to become available. Each retry waits DataPollInterval
 	// before the next attempt. Default is 120 retries (60 seconds at 500ms intervals).
 	RicRetries int
+
+	// Resolution specifies the scanning resolution in dots per inch.
+	// Supported values: DPI150, DPI200, DPI300, DPI600. Default is DPI300.
+	Resolution Resolution
 }
 
 // defaultOptions returns the default options for the Scanner.
@@ -45,6 +65,7 @@ func defaultOptions() Options {
 		ButtonPollInterval: 1 * time.Second,
 		DataPollInterval:   500 * time.Millisecond,
 		RicRetries:         120,
+		Resolution:         DPI300,
 	}
 }
 
@@ -66,6 +87,9 @@ func New(dev io.ReadWriteCloser, opts *Options) *Scanner {
 		}
 		if opts.RicRetries > 0 {
 			s.opts.RicRetries = opts.RicRetries
+		}
+		if opts.Resolution > 0 {
+			s.opts.Resolution = opts.Resolution
 		}
 	}
 	return s
@@ -90,6 +114,11 @@ func (s *Scanner) Close() error {
 // The full command sequence runs on every call. It is safe to call again after
 // hardware errors or firmware resets to restore the scanner to a known state.
 func (s *Scanner) Initialize(ctx context.Context) error {
+	if !s.opts.Resolution.valid() {
+		return fmt.Errorf("unsupported resolution: %d DPI", s.opts.Resolution)
+	}
+	s.dev.resolution = s.opts.Resolution
+
 	steps := []struct {
 		name string
 		fn   func(context.Context) error
@@ -194,17 +223,18 @@ func (s *Scanner) Scan(ctx context.Context) iter.Seq2[*Page, error] {
 				return
 			}
 
-			// Start scan
 			if err := s.dev.startScan(ctx); err != nil {
 				yield(nil, fmt.Errorf("start scan: %w", err))
 				return
 			}
 
-			// Get pixel size
-			if err := s.dev.pixelSize(ctx); err != nil {
+			width, height, err := s.dev.pixelSize(ctx)
+			if err != nil {
 				yield(nil, fmt.Errorf("get pixel size: %w", err))
 				return
 			}
+
+			chunkSize := 17 * width * 3
 
 			// Scan both sides - yield each immediately
 			for side := range 2 {
@@ -220,16 +250,16 @@ func (s *Scanner) Scan(ctx context.Context) iter.Seq2[*Page, error] {
 					side:             side,
 					dataPollInterval: s.opts.DataPollInterval,
 					ricRetries:       s.opts.RicRetries,
+					chunkSize:        chunkSize,
 				}
 
 				// Convert to image while streaming
-				img, err := imageFromReader(reader)
+				img, err := imageFromReader(reader, width, height)
 				if err != nil {
 					yield(nil, fmt.Errorf("scan side %d: %w", side, err))
 					return
 				}
 
-				// Yield this side immediately
 				page := &Page{
 					Image: img,
 					Side:  Side(side),

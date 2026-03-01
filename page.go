@@ -49,6 +49,7 @@ type streamingReader struct {
 	side             int
 	dataPollInterval time.Duration
 	ricRetries       int
+	chunkSize        int
 	chunks           [][]byte
 	chunkIdx         int
 	offset           int
@@ -88,7 +89,7 @@ func (r *streamingReader) Read(p []byte) (n int, err error) {
 			if r.ctx.Err() != nil {
 				return 0, r.ctx.Err()
 			}
-			ricErr = r.dev.checkImageReady(r.ctx, r.side)
+			ricErr = r.dev.checkImageReady(r.ctx, r.side, r.chunkSize)
 			if ricErr == nil {
 				break
 			}
@@ -103,7 +104,7 @@ func (r *streamingReader) Read(p []byte) (n int, err error) {
 		}
 
 		// Read data
-		resp, err := r.dev.readData(r.ctx, r.side)
+		resp, err := r.dev.readData(r.ctx, r.side, r.chunkSize)
 		if errors.Is(err, ErrTemporaryNoData) {
 			select {
 			case <-r.ctx.Done():
@@ -127,21 +128,12 @@ func (r *streamingReader) Read(p []byte) (n int, err error) {
 
 // imageFromReader decodes raw RGB image data into an image.Image.
 //
-// The iX500 at 600 dpi produces images with fixed dimensions:
-//   - Width: 4,960 pixels (8.27 inches × 600 dpi)
-//   - Maximum height: 7,016 pixels (11.69 inches × 600 dpi)
-//   - Format: 24-bit RGB, 3 bytes per pixel, 14,880 bytes per scan line
-//
-// The function reads row-by-row, constructing an RGBA image. It handles variable
-// document heights by detecting EOF and cropping the final image to the actual
-// number of scan lines received. The scanner may return fewer lines than the
-// maximum for shorter documents.
-func imageFromReader(r io.Reader) (image.Image, error) {
-	const (
-		width        = 4960
-		height       = 7016
-		bytesPerLine = width * 3
-	)
+// The width and height are provided by the scanner via pixelSize(). Format is
+// 24-bit RGB, 3 bytes per pixel. The function reads row-by-row, constructing an
+// RGBA image. It handles variable document heights by detecting EOF and cropping
+// the final image to the actual number of scan lines received.
+func imageFromReader(r io.Reader, width, height int) (image.Image, error) {
+	bytesPerLine := width * 3
 
 	// We don't know final height until we've read all data
 	// Allocate for max height, then adjust

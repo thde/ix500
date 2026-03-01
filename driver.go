@@ -64,7 +64,8 @@ var (
 // device owns the USB ReadWriteCloser and provides the SCSI command layer.
 // All scanner protocol functions are methods on device.
 type device struct {
-	dev io.ReadWriteCloser
+	dev        io.ReadWriteCloser
+	resolution Resolution
 }
 
 // Close closes the underlying USB device.
@@ -268,12 +269,13 @@ func (d *device) preread(ctx context.Context) error {
 	// 000: 53 45 54 20 50 52 45 20 52 45 41 44 4d 4f 44 45 SET PRE READMODE
 	// 010: 02 58 02 58 00 00 26 c3 00 00 36 d1 05 7f 00 00 .X.X..&...6.....
 
+	res := uint16(d.resolution)
 	extra := append([]byte("SET PRE READMODE"),
-		0x02, // x resolution: hi byte
-		0x58, // x resolution: lo byte (→ 600 dpi)
+		byte(res>>8), // x resolution: hi byte
+		byte(res),    // x resolution: lo byte
 
-		0x02, // y resolution: hi byte
-		0x58, // y resolution: lo byte (→ 600 dpi)
+		byte(res>>8), // y resolution: hi byte
+		byte(res),    // y resolution: lo byte
 
 		0x00, // paper width
 		0x00, // paper width
@@ -594,6 +596,23 @@ func (d *device) setWindow(ctx context.Context) error {
 	// 070: c1 80 01 00 00 00 00 00 00 00 00 00 00 00 00 00 ................
 	// 080: 00 00 00 00 00 00 00 00                         ........
 
+	extra := []byte{ // window descriptor, see also https://www.staff.uni-mainz.de/tacke/scsi/SCSI2-15.html#tab282
+		0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x40, 0x00, 0x00, 0x02, 0x58, 0x02, 0x58, 0x00, 0x00,
+		0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x26, 0xc0, 0x00, 0x00, 0x36, 0xd0, 0x00, 0x00,
+		0x00, 0x05, 0x08, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+		0xc1, 0x80, 0x01, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0xc0, 0x00, 0x00,
+		0x26, 0xc3, 0x00, 0x00, 0x36, 0xd1, 0x00, 0x00, 0x80, 0x00, 0x02, 0x58, 0x02, 0x58, 0x00, 0x00,
+		0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x26, 0xc0, 0x00, 0x00, 0x36, 0xd0, 0x00, 0x00,
+		0x00, 0x05, 0x08, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+		0xc1, 0x80, 0x01, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+		0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+	}
+	res := uint16(d.resolution)
+	binary.BigEndian.PutUint16(extra[10:12], res) // front X res
+	binary.BigEndian.PutUint16(extra[12:14], res) // front Y res
+	binary.BigEndian.PutUint16(extra[74:76], res) // back X res
+	binary.BigEndian.PutUint16(extra[76:78], res) // back Y res
+
 	_, err := d.do(ctx, &request{
 		cmd: []byte{
 			0x24, // SCSI opcode: set window
@@ -608,17 +627,7 @@ func (d *device) setWindow(ctx context.Context) error {
 			0x88, // transfer length (LSB): 136 bytes */
 			0x00, // control
 		},
-		extra: []byte{ // window descriptor, see also https://www.staff.uni-mainz.de/tacke/scsi/SCSI2-15.html#tab282
-			0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x40, 0x00, 0x00, 0x02, 0x58, 0x02, 0x58, 0x00, 0x00,
-			0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x26, 0xc0, 0x00, 0x00, 0x36, 0xd0, 0x00, 0x00,
-			0x00, 0x05, 0x08, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
-			0xc1, 0x80, 0x01, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0xc0, 0x00, 0x00,
-			0x26, 0xc3, 0x00, 0x00, 0x36, 0xd1, 0x00, 0x00, 0x80, 0x00, 0x02, 0x58, 0x02, 0x58, 0x00, 0x00,
-			0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x26, 0xc0, 0x00, 0x00, 0x36, 0xd0, 0x00, 0x00,
-			0x00, 0x05, 0x08, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
-			0xc1, 0x80, 0x01, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
-			0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
-		},
+		extra: extra,
 	})
 
 	return err
@@ -954,25 +963,21 @@ func (d *device) startScan(ctx context.Context) error {
 //
 // These values determine the number of bytes per scan line (width × 3 for RGB)
 // and the total image size.
-func (d *device) pixelSize(ctx context.Context) error {
+func (d *device) pixelSize(ctx context.Context) (width, height int, err error) {
 	// request:
 	// 000: 43 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 C...............
 	// 010: 00 00 00 28 00 80 00 00 00 00 00 20 00 00 00    ...(....... ...
 
-	// extra request:
+	// response extra:
 	// 000: 00 00 13 60 00 00 1b 68 00 00 13 60 00 00 1b 68 ...`...h...`...h
 	// 010: 00 00 00 00 00 00 00 00 13 60 00 00 1b 68 00 00 .........`...h..
 
-	// TODO: interpret pixel size?
-	// first 4 bytes: scan_x = 4960
-	// next 4 bytes: scan_y = 7016
+	// first 4 bytes: scan_x (e.g. 4960 at 600 dpi)
+	// next 4 bytes:  scan_y (e.g. 7016 at 600 dpi)
+	// next 4 bytes:  paper_w
+	// next 4 bytes:  paper_l
 
-	// next 4 bytes: paper_w = 4960
-	// next 4 bytes: paper_l = 7016
-
-	// → bytes per line = scan_x * 3 (for color) = 14880
-
-	_, err := d.do(ctx, &request{
+	resp, err := d.do(ctx, &request{
 		cmd: []byte{
 			0x28, // SCSI opcode: READ
 			0x00, // reserved
@@ -988,14 +993,21 @@ func (d *device) pixelSize(ctx context.Context) error {
 		},
 		respLen: 32,
 	})
-	return err
+	if err != nil {
+		return width, height, err
+	}
+
+	width = int(binary.BigEndian.Uint32(resp.extra[0:4]))
+	height = int(binary.BigEndian.Uint32(resp.extra[4:8]))
+	width -= width % 2 // ppl_mod=2 alignment: iX500 color mode requires even pixel width
+	return width, height, nil
 }
 
 // checkImageReady issues a single SCANNER_CONTROL command (0xf1, function 0x10) to check
 // whether image data is ready for the specified window (0x00 for front, 0x80 for back).
 // It returns nil if data is available, or an error otherwise. Retry policy is the
 // caller's responsibility.
-func (d *device) checkImageReady(ctx context.Context, side int) error {
+func (d *device) checkImageReady(ctx context.Context, side int, chunkSize int) error {
 	// request:
 	// 000: 43 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 C...............
 	// 010: 00 00 00 f1 10 00 00 00 00 03 dc 20 00 00 00    ........... ...
@@ -1011,11 +1023,10 @@ func (d *device) checkImageReady(ctx context.Context, side int) error {
 			windowID, // window id: front (back is 0x80)
 			0x00,
 			0x00,
-
 			0x00,
-			0x03,
-			0xdc,
-			0x20,
+			byte(chunkSize >> 16),
+			byte(chunkSize >> 8),
+			byte(chunkSize),
 			0x00,
 		},
 	})
@@ -1032,7 +1043,7 @@ func (d *device) checkImageReady(ctx context.Context, side int) error {
 // The transfer length specifies how many bytes to read (252,960 bytes = 252KB chunk).
 // Multiple READ commands may be necessary to retrieve a complete image. The function
 // inverts the pixel values (255 - value) as the scanner returns inverted data.
-func (d *device) readData(ctx context.Context, side int) (*response, error) {
+func (d *device) readData(ctx context.Context, side int, chunkSize int) (*response, error) {
 	// request:
 	// 000: 43 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 C...............
 	// 010: 00 00 00 28 00 00 00 00 00 03 dc 20 00 00 00    ...(....... ...
@@ -1044,19 +1055,18 @@ func (d *device) readData(ctx context.Context, side int) (*response, error) {
 
 	resp, err := d.do(ctx, &request{
 		cmd: []byte{
-			0x28, // SCSI opcode: READ
-			0x00, // reserved
-			0x00, // data type code: image
-			0x00, // reserved
-			0x00, // data type qualifier (MSB)
-
-			windowID, // data type qualifier (LSB): window id
-			0x03,     // transfer length (MSB)
-			0xdc,     // transfer length
-			0x20,     // transfer length (LSB)
-			0x00,     // control
+			0x28,                  // SCSI opcode: READ
+			0x00,                  // reserved
+			0x00,                  // data type code: image
+			0x00,                  // reserved
+			0x00,                  // data type qualifier (MSB)
+			windowID,              // data type qualifier (LSB): window id
+			byte(chunkSize >> 16), // transfer length (MSB)
+			byte(chunkSize >> 8),  // transfer length
+			byte(chunkSize),       // transfer length (LSB)
+			0x00,                  // control
 		},
-		respLen: 252960,
+		respLen: chunkSize,
 	})
 	if err != nil {
 		return resp, err
