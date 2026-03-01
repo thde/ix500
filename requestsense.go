@@ -44,18 +44,19 @@ const (
 //  3. ASCQ (Additional Sense Code Qualifier) - detailed error variant
 //
 // Additional parameters provide context:
-//   - rsInfo: Information bytes (typically the residue count for short reads)
 //   - rsEom: End of Medium flag, set when reaching end of paper
 //   - rsIli: Incorrect Length Indicator, set when actual transfer length differs from requested
 //
 // The function maps Fujitsu-specific vendor codes (ASC 0x80) to meaningful errors
 // like paper jams, hopper empty, and button presses. It returns nil for successful
 // operations (noSense with ASC 0x00 or 0x80).
-func requestSenseToError(sense byte, asc byte, ascq byte, rsInfo []byte, rsEom bool, rsIli bool) error {
+func requestSenseToError(sense, asc, ascq byte, rsEom, rsIli bool) error {
 	switch sense {
 	case noSense:
-		if asc == 0x80 { // why 0x80?
-			return nil // no sense
+		if asc == 0x80 {
+			// ASC 0x80 is vendor-specific (Fujitsu). Under noSense, it indicates
+			// a benign vendor acknowledgment — no error condition.
+			return nil
 		}
 		if asc != 0x00 {
 			return errors.New("unknown asc")
