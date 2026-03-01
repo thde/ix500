@@ -38,6 +38,14 @@ func (r Resolution) valid() bool {
 	return false
 }
 
+// ScanMode controls whether both sides or only the front side of each sheet are scanned.
+type ScanMode int
+
+const (
+	Duplex  ScanMode = 0 // both sides (default)
+	Simplex ScanMode = 1 // front side only
+)
+
 // Options configures timing and retry behavior for Scanner operations.
 type Options struct {
 	// ButtonPollInterval specifies how often to check the scan button status.
@@ -57,6 +65,10 @@ type Options struct {
 	// Resolution specifies the scanning resolution in dots per inch.
 	// Supported values: DPI150, DPI200, DPI300, DPI600. Default is DPI300.
 	Resolution Resolution
+
+	// ScanMode controls whether both sides (Duplex, default) or only the front
+	// side (Simplex) of each sheet are scanned.
+	ScanMode ScanMode
 }
 
 // defaultOptions returns the default options for the Scanner.
@@ -91,6 +103,7 @@ func New(dev io.ReadWriteCloser, opts *Options) *Scanner {
 		if opts.Resolution > 0 {
 			s.opts.Resolution = opts.Resolution
 		}
+		s.opts.ScanMode = opts.ScanMode
 	}
 	return s
 }
@@ -118,6 +131,7 @@ func (s *Scanner) Initialize(ctx context.Context) error {
 		return fmt.Errorf("unsupported resolution: %d DPI", s.opts.Resolution)
 	}
 	s.dev.resolution = s.opts.Resolution
+	s.dev.scanMode = s.opts.ScanMode
 
 	steps := []struct {
 		name string
@@ -236,8 +250,13 @@ func (s *Scanner) Scan(ctx context.Context) iter.Seq2[*Page, error] {
 
 			chunkSize := 17 * width * 3
 
-			// Scan both sides - yield each immediately
-			for side := range 2 {
+			sides := 2
+			if s.dev.scanMode == Simplex {
+				sides = 1
+			}
+
+			// Scan sides - yield each immediately
+			for side := range sides {
 				if ctx.Err() != nil {
 					yield(nil, ctx.Err())
 					return

@@ -26,6 +26,8 @@ type Config struct {
 	LogLevel string
 	// Resolution sets the scanning resolution in DPI (150, 200, 300, 600).
 	Resolution int
+	// Simplex enables front-only scanning when true.
+	Simplex bool
 }
 
 func parseFlags() *Config {
@@ -33,6 +35,7 @@ func parseFlags() *Config {
 	flag.StringVar(&cfg.OutputDir, "out-dir", "/perm/scannyd", "Output directory")
 	flag.StringVar(&cfg.LogLevel, "log-level", "debug", "Log level (debug|info|warn|error)")
 	flag.IntVar(&cfg.Resolution, "dpi", 300, "Scanning resolution in DPI (150, 200, 300, 600)")
+	flag.BoolVar(&cfg.Simplex, "simplex", false, "Scan front side only (simplex mode)")
 	flag.Parse()
 	return cfg
 }
@@ -59,7 +62,14 @@ func main() {
 		os.Exit(1)
 	}
 
-	scn := ix500.New(dev, &ix500.Options{Resolution: ix500.Resolution(cfg.Resolution)})
+	scanMode := ix500.Duplex
+	if cfg.Simplex {
+		scanMode = ix500.Simplex
+	}
+	scn := ix500.New(dev, &ix500.Options{
+		Resolution: ix500.Resolution(cfg.Resolution),
+		ScanMode:   scanMode,
+	})
 	defer scn.Close()
 
 	if err := scn.Initialize(ctx); err != nil {

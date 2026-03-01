@@ -68,6 +68,7 @@ var (
 type device struct {
 	dev        io.ReadWriteCloser
 	resolution Resolution
+	scanMode   ScanMode
 }
 
 // Close closes the underlying USB device.
@@ -625,8 +626,15 @@ func (d *device) setWindow(ctx context.Context) error {
 	res := uint16(d.resolution)
 	binary.BigEndian.PutUint16(extra[10:12], res) // front X res
 	binary.BigEndian.PutUint16(extra[12:14], res) // front Y res
-	binary.BigEndian.PutUint16(extra[74:76], res) // back X res
-	binary.BigEndian.PutUint16(extra[76:78], res) // back Y res
+	transferLen := len(extra)
+	if d.scanMode == Simplex {
+		extra = extra[:0x48]
+		transferLen = 0x48
+		// Skip back window resolution (no back window sent)
+	} else {
+		binary.BigEndian.PutUint16(extra[74:76], res) // back X res
+		binary.BigEndian.PutUint16(extra[76:78], res) // back Y res
+	}
 
 	_, err := d.do(ctx, &request{
 		cmd: []byte{
@@ -636,11 +644,11 @@ func (d *device) setWindow(ctx context.Context) error {
 			0x00, // reserved
 			0x00, // reserved
 
-			0x00, // reserved
-			0x00, // transfer length (MSB)
-			0x00, // transfer length
-			0x88, // transfer length (LSB): 136 bytes */
-			0x00, // control
+			0x00,                    // reserved
+			0x00,                    // transfer length (MSB)
+			byte(transferLen >> 8),  // transfer length
+			byte(transferLen),       // transfer length (LSB)
+			0x00,                    // control
 		},
 		extra: extra,
 	})
@@ -950,19 +958,20 @@ func (d *device) startScan(ctx context.Context) error {
 	// 000: 43 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 C...............
 	// 010: 00 00 00 1b 00 00 00 02 00 00 00 00 00 00 00    ...............
 
+	windowIDs := []byte{0x00, 0x80}
+	if d.scanMode == Simplex {
+		windowIDs = []byte{0x00}
+	}
 	_, err := d.do(ctx, &request{
 		cmd: []byte{
-			0x1b, // SCSI opcode: SCAN
-			0x00, // reserved
-			0x00, // reserved
-			0x00, // reserved
-			0x02, // transfer length
-			0x00, // control
+			0x1b,                    // SCSI opcode: SCAN
+			0x00,                    // reserved
+			0x00,                    // reserved
+			0x00,                    // reserved
+			byte(len(windowIDs)),    // transfer length
+			0x00,                    // control
 		},
-		extra: []byte{ // window ID list
-			0x00, // front
-			0x80, // back
-		},
+		extra: windowIDs,
 	})
 	return err
 }
