@@ -28,7 +28,9 @@ import (
 	"context"
 	"encoding/binary"
 	"errors"
+	"fmt"
 	"io"
+	"strings"
 )
 
 var (
@@ -198,7 +200,9 @@ func (d *device) do(ctx context.Context, r *request) (*response, error) {
 		return nil, err
 	}
 
-	// TODO: verify rsResp.raw itself is successful?
+	if rsResp.raw[usbStatusOffset] != 0 {
+		return resp, errors.New("request sense failed")
+	}
 
 	// 000: f0 00 03 00 00 00 00 0a 00 00 00 00 80 13 00 00 ................
 	// 010: 00 00                                           ..
@@ -215,7 +219,7 @@ func (d *device) do(ctx context.Context, r *request) (*response, error) {
 		resp.extra = resp.extra[:n]
 	}
 
-	return resp, requestSenseToError(sense, asc, ascq, rsInfo, rsEom, rsIli)
+	return resp, requestSenseToError(sense, asc, ascq, rsEom, rsIli)
 }
 
 // inquire sends the SCSI INQUIRY command (0x12) to identify the scanner.
@@ -229,8 +233,7 @@ func (d *device) inquire(ctx context.Context) error {
 	// 000: 43 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 C...............
 	// 010: 00 00 00 12 00 00 00 60 00 00 00 00 00 00 00    .......`.......
 
-	// TODO: verify the scanner make and model in resp.extra?
-	_, err := d.do(ctx, &request{
+	resp, err := d.do(ctx, &request{
 		cmd: []byte{
 			0x12, // SCSI opcode: INQUIRY
 			0x00, // EVPD (enable vital product data): disabled
@@ -241,6 +244,18 @@ func (d *device) inquire(ctx context.Context) error {
 		},
 		respLen: 96,
 	})
+	if err != nil {
+		return err
+	}
+
+	vendor := strings.TrimSpace(string(resp.extra[8:16]))
+	product := strings.TrimSpace(string(resp.extra[16:32]))
+	if vendor != "FUJITSU" {
+		return fmt.Errorf("unsupported vendor: %q", vendor)
+	}
+	if !strings.Contains(product, "iX500") {
+		return fmt.Errorf("unsupported product: %q", product)
+	}
 
 	// response:
 	// 000: 06 00 92 02 5b 00 00 10 46 55 4a 49 54 53 55 20 ....[...FUJITSU
@@ -250,7 +265,7 @@ func (d *device) inquire(ctx context.Context) error {
 	// 040: 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 ................
 	// 050: 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 ................
 
-	return err
+	return nil
 }
 
 // preread configures scan parameters using the vendor-specific "SET PRE READMODE" command.
