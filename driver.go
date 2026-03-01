@@ -21,6 +21,7 @@
 // See also:
 //   - https://www.staff.uni-mainz.de/tacke/scsi/SCSI2-15.html (SCSI-2 scanner specification)
 //   - https://gitlab.com/sane-project/backends/-/raw/master/backend/fujitsu.c (SANE implementation)
+//   - https://gitlab.com/sane-project/backends/-/raw/master/backend/fujitsu-scsi.h
 package ix500
 
 import (
