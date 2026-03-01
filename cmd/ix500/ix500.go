@@ -166,7 +166,10 @@ func savePage(page *ix500.Page, path string) error {
 	}
 	defer f.Close()
 
-	return jpeg.Encode(f, page, &jpeg.Options{Quality: 75})
+	if err := jpeg.Encode(f, page, &jpeg.Options{Quality: 75}); err != nil {
+		return err
+	}
+	return f.Sync()
 }
 
 func parseLogLevel(level string) slog.Level {
