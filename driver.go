@@ -649,11 +649,11 @@ func (d *device) setWindow(ctx context.Context) error {
 			0x00, // reserved
 			0x00, // reserved
 
-			0x00,                    // reserved
-			0x00,                    // transfer length (MSB)
-			byte(transferLen >> 8),  // transfer length
-			byte(transferLen),       // transfer length (LSB)
-			0x00,                    // control
+			0x00,                   // reserved
+			0x00,                   // transfer length (MSB)
+			byte(transferLen >> 8), // transfer length
+			byte(transferLen),      // transfer length (LSB)
+			0x00,                   // control
 		},
 		extra: extra,
 	})
@@ -991,12 +991,12 @@ func (d *device) startScan(ctx context.Context) error {
 	}
 	_, err := d.do(ctx, &request{
 		cmd: []byte{
-			0x1b,                    // SCSI opcode: SCAN
-			0x00,                    // reserved
-			0x00,                    // reserved
-			0x00,                    // reserved
-			byte(len(windowIDs)),    // transfer length
-			0x00,                    // control
+			0x1b,                 // SCSI opcode: SCAN
+			0x00,                 // reserved
+			0x00,                 // reserved
+			0x00,                 // reserved
+			byte(len(windowIDs)), // transfer length
+			0x00,                 // control
 		},
 		extra: windowIDs,
 	})

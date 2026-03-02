@@ -20,20 +20,20 @@ type senseCode struct {
 // SCSI sense key values define the general category of error conditions.
 // These are standard values defined in the SCSI-2 specification.
 const (
-	noSense         byte = iota // No error or special condition
-	recoveredError              // Error recovered by device (data valid)
-	notReady                    // Device is not ready for operation
-	mediumError                 // Medium-related error (paper jam, etc.)
-	hardwareError               // Hardware malfunction detected
-	illegalRequest              // Invalid command or parameter
-	unitAttention               // Device state changed (reset, power event)
-	dataProtect                 // Write-protected or access denied
-	firmwareError               // Firmware or vendor-specific error
-	_                           // Reserved
-	abortedCommand              // Command was aborted
-	equal                       // SEARCH DATA satisfied (not used in scanners)
-	volumeOverflow              // Buffer overflow condition
-	miscompare                  // Verify operation found mismatch
+	noSense        byte = iota // No error or special condition
+	recoveredError             // Error recovered by device (data valid)
+	notReady                   // Device is not ready for operation
+	mediumError                // Medium-related error (paper jam, etc.)
+	hardwareError              // Hardware malfunction detected
+	illegalRequest             // Invalid command or parameter
+	unitAttention              // Device state changed (reset, power event)
+	dataProtect                // Write-protected or access denied
+	firmwareError              // Firmware or vendor-specific error
+	_                          // Reserved
+	abortedCommand             // Command was aborted
+	equal                      // SEARCH DATA satisfied (not used in scanners)
+	volumeOverflow             // Buffer overflow condition
+	miscompare                 // Verify operation found mismatch
 )
 
 // requestSenseToError converts SCSI REQUEST SENSE response data into a Go error.
@@ -132,7 +132,7 @@ func requestSenseToError(sense, asc, ascq byte, rsEom, rsIli bool) error {
 			{0x20, 0x00}: errors.New("invalid command"),
 			{0x24, 0x00}: errors.New("invalid CDB field"),
 			{0x25, 0x00}: errors.New("unsupported logical unit"),
-			{0x26, 0x00}: errors.New("invalid field in parm list"),
+			{0x26, 0x00}: errors.New("invalid field in param list"),
 			{0x2c, 0x00}: errors.New("command sequence error"),
 			{0x2c, 0x02}: errors.New("wrong window combination"),
 		}
