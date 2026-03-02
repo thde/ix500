@@ -1,4 +1,4 @@
-// Package main provides a CLI tool for the Fujitsu ScanSnap iX500 ix500.
+// Package main provides a CLI tool for the Fujitsu ScanSnap iX500.
 // It runs as a daemon, waiting for the scan button to be pressed, and then
 // saves scanned pages as JPEG files in the specified output directory.
 package main
@@ -31,8 +31,13 @@ type Config struct {
 }
 
 func parseFlags() *Config {
+	home, err := os.UserHomeDir()
+	if err != nil {
+		home = os.TempDir()
+	}
+
 	cfg := &Config{}
-	flag.StringVar(&cfg.OutputDir, "out-dir", "/perm/scannyd", "Output directory")
+	flag.StringVar(&cfg.OutputDir, "out-dir", filepath.Join(home, "ix500"), "Output directory")
 	flag.StringVar(&cfg.LogLevel, "log-level", "debug", "Log level (debug|info|warn|error)")
 	flag.IntVar(&cfg.Resolution, "dpi", 300, "Scanning resolution in DPI (150, 200, 300, 600)")
 	flag.BoolVar(&cfg.Simplex, "simplex", false, "Scan front side only (simplex mode)")
@@ -50,6 +55,7 @@ func main() {
 		Level:     parseLogLevel(cfg.LogLevel),
 		AddSource: true,
 	}))
+	logger.Debug("parsed configuration", "cfg", cfg)
 
 	if err := os.MkdirAll(cfg.OutputDir, 0o755); err != nil {
 		logger.Error("failed to create output directory", "dir", cfg.OutputDir, "err", err)
