@@ -1,5 +1,7 @@
 # ix500
 
+[![Go Reference](https://pkg.go.dev/badge/thde.io/ix500.svg)](https://pkg.go.dev/thde.io/ix500) [![test](https://github.com/thde/ix500/actions/workflows/test.yml/badge.svg)](https://github.com/thde/ix500/actions/workflows/test.yml) [![Go Report Card](https://goreportcard.com/badge/thde.io/ix500)](https://goreportcard.com/report/thde.io/ix500)
+
 A Linux driver and scan daemon for the Fujitsu ScanSnap iX500 document scanner based on the [stapelberg/scan2drive](https://github.com/stapelberg/scan2drive) implementation. Supports custom DPI, simplex/duplex scanning.
 
 Implements the SCSI-2 scanner command set over Linux's `usbdevfs` bulk transfer interface. No SANE, libusb, or kernel module required.
