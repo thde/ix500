@@ -219,14 +219,34 @@ func (s *Scanner) WaitForButton(ctx context.Context) error {
 // sheet first. Callers can use Page.Sheet and Page.Side to reorder as needed.
 func (s *Scanner) Scan(ctx context.Context) iter.Seq2[*Page, error] {
 	return func(yield func(*Page, error) bool) {
+		defer func() {
+			cleanupCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+			defer cancel()
+			_ = s.dev.cancel(cleanupCtx)
+		}()
+
 		for sheetNum := 0; ; sheetNum++ {
 			if ctx.Err() != nil {
 				yield(nil, ctx.Err())
 				return
 			}
 
+			// Check hopper before attempting to load paper.
+			status, err := s.dev.hardwareStatus(ctx)
+			if err != nil {
+				yield(nil, fmt.Errorf("hardware status: %w", err))
+				return
+			}
+			if !status.Hopper {
+				if sheetNum == 0 {
+					yield(nil, ErrNoDocument)
+				}
+				return
+			}
+
 			// Load next sheet
 			if err := s.dev.objectPosition(ctx); err != nil {
+				// Race: hopper may empty between status check and objectPosition.
 				if errors.Is(err, ErrHopperEmpty) {
 					if sheetNum == 0 {
 						yield(nil, ErrNoDocument)

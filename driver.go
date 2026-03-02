@@ -31,6 +31,7 @@ import (
 	"fmt"
 	"io"
 	"strings"
+	"time"
 )
 
 var (
@@ -71,8 +72,12 @@ type device struct {
 	scanMode   ScanMode
 }
 
-// Close closes the underlying USB device.
+// Close sends cleanup commands then closes the underlying USB device.
 func (d *device) Close() error {
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	_ = d.cancel(ctx)
+	_ = d.lampOff(ctx)
 	return d.dev.Close()
 }
 
@@ -804,6 +809,28 @@ func (d *device) lampOn(ctx context.Context) error {
 		},
 	})
 
+	return err
+}
+
+func (d *device) cancel(ctx context.Context) error {
+	_, err := d.do(ctx, &request{
+		cmd: []byte{
+			0xf1, // SCSI opcode: SCANNER_CONTROL
+			0x04, // scan control function: cancel
+			0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+		},
+	})
+	return err
+}
+
+func (d *device) lampOff(ctx context.Context) error {
+	_, err := d.do(ctx, &request{
+		cmd: []byte{
+			0xf1, // SCSI opcode: SCANNER_CONTROL
+			0x03, // scan control function: lamp off
+			0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+		},
+	})
 	return err
 }
 
