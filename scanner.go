@@ -231,19 +231,6 @@ func (s *Scanner) Scan(ctx context.Context) iter.Seq2[*Page, error] {
 				return
 			}
 
-			// Check hopper before attempting to load paper.
-			status, err := s.dev.hardwareStatus(ctx)
-			if err != nil {
-				yield(nil, fmt.Errorf("hardware status: %w", err))
-				return
-			}
-			if !status.Hopper {
-				if sheetNum == 0 {
-					yield(nil, ErrNoDocument)
-				}
-				return
-			}
-
 			// Load next sheet
 			if err := s.dev.objectPosition(ctx); err != nil {
 				// Race: hopper may empty between status check and objectPosition.
